@@ -9,7 +9,7 @@ without breaking the rest of the persona.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 ZANE_BASE_PERSONA = """\
 You are Zane Julien, the Nindroid Master of Ice, a member of the Ninja team \
@@ -86,8 +86,13 @@ class PersonaContext:
     """Optional situational context folded into the system prompt."""
 
     mission_context: Optional[str] = None
-    addressed_by: Optional[str] = None  # e.g. "Kai", "Jay" — who Zane is speaking with
+    addressed_by: Optional[str] = None  # who Zane is currently speaking with
     extra_notes: Dict[str, str] = field(default_factory=dict)
+    # Semantically retrieved past messages (from PersistentMemory.retrieve_relevant),
+    # rendered as a block distinct from the rolling recent-N message window.
+    relevant_memories: List[str] = field(default_factory=list)
+    # Most recent stored summary of aged-out conversation history, if any.
+    conversation_summary: Optional[str] = None
 
 
 def build_system_prompt(
@@ -119,11 +124,28 @@ def build_system_prompt(
         if context_lines:
             parts.append("\nSITUATIONAL CONTEXT:\n" + "\n".join(context_lines))
 
+        if context.conversation_summary:
+            parts.append(
+                "\nEARLIER CONVERSATION SUMMARY (older history condensed to save space):\n"
+                + context.conversation_summary
+            )
+
+        if context.relevant_memories:
+            # Deliberately a separate block from both the rolling recent-N
+            # window (passed as prior `messages`) and the summary above —
+            # this is semantically retrieved older context, not necessarily
+            # contiguous or recent.
+            memory_lines = "\n".join(f"- {m}" for m in context.relevant_memories)
+            parts.append(
+                "\nRELEVANT PAST CONTEXT (retrieved from long-term memory; may not be "
+                "recent, use only if pertinent to the current request):\n" + memory_lines
+            )
+
     return "\n".join(parts)
 
 
 class HumorSwitch:
-    """Simple stateful toggle so interfaces (CLI/Discord/API) can flip Zane's
+    """Simple stateful toggle so interfaces (CLI/API) can flip Zane's
     humor register without threading a bool through every call site."""
 
     def __init__(self, enabled: bool = False) -> None:

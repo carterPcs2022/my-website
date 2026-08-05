@@ -18,3 +18,9 @@ Makefile
 compile_commands.json
 .vscode/
 .idea/
+
+# Runtime persistent-memory artifacts (SQLite DB + FAISS index)
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.faiss

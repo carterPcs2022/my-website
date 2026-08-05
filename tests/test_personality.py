@@ -29,6 +29,36 @@ def test_context_injection():
     assert "Fire Temple" in prompt
 
 
+def test_relevant_memories_rendered_as_distinct_block():
+    ctx = PersonaContext(
+        relevant_memories=["[user @ 2026-01-01 00:00 UTC] I prefer ice-related metaphors."]
+    )
+    prompt = build_system_prompt(context=ctx)
+    assert "RELEVANT PAST CONTEXT" in prompt
+    assert "ice-related metaphors" in prompt
+
+
+def test_conversation_summary_rendered_separately_from_relevant_memories():
+    ctx = PersonaContext(
+        conversation_summary="The user and Zane discussed a prior mission to the Fire Temple.",
+        relevant_memories=["[user @ 2026-01-01 00:00 UTC] The vault code is 4471."],
+    )
+    prompt = build_system_prompt(context=ctx)
+    assert "EARLIER CONVERSATION SUMMARY" in prompt
+    assert "Fire Temple" in prompt
+    assert "RELEVANT PAST CONTEXT" in prompt
+    assert "vault code" in prompt
+    # The summary block must appear before the retrieved-memory block.
+    assert prompt.index("EARLIER CONVERSATION SUMMARY") < prompt.index("RELEVANT PAST CONTEXT")
+
+
+def test_no_memory_blocks_when_context_has_none():
+    ctx = PersonaContext(addressed_by="Nya")
+    prompt = build_system_prompt(context=ctx)
+    assert "EARLIER CONVERSATION SUMMARY" not in prompt
+    assert "RELEVANT PAST CONTEXT" not in prompt
+
+
 def test_humor_switch_toggle():
     switch = HumorSwitch(enabled=False)
     assert switch.enabled is False

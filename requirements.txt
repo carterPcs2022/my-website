@@ -7,12 +7,14 @@ pydantic>=2.7.0
 ddgs>=9.0.0
 tavily-python>=0.5.0  # optional: used automatically if TAVILY_API_KEY is set
 
+# Persistent, retrieval-augmented memory
+sentence-transformers>=3.0.0
+faiss-cpu>=1.8.0
+numpy>=1.26.0
+
 # API deployment surface
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
-
-# Discord deployment surface (optional)
-discord.py>=2.4.0
 
 # C++ extension build
 pybind11>=2.12.0

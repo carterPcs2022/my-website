@@ -1,10 +1,10 @@
 # Zane — Digital Mind
 
-A hybrid C++/Python cognitive architecture for **Zane Julien**, the Nindroid
-Master of Ice: ultra-fast LLM responses via **Groq**, a live web-search
-pipeline for "infinite information," and a thread-safe C++ engine for his
-analytical/probability readouts — all wrapped behind one interface so the
-exact same engine runs as a CLI, a Discord bot, or a REST API.
+A hybrid C++/Python cognitive architecture for **Zane**: ultra-fast LLM
+responses via **Groq**, a live web-search pipeline for "infinite
+information," and a thread-safe C++ engine for his analytical/probability
+readouts — all wrapped behind one interface so the exact same engine runs
+as a CLI or a REST API.
 
 ## Architecture
 
@@ -18,18 +18,24 @@ zane/                     High-level AI layer (Python)
   config.py                    Environment-driven settings
   personality.py                System-prompt injector + Humor Switch
   groq_client.py                Async Groq client w/ retry & backoff
-  memory.py                     Rolling conversational memory
   analytics_bridge.py            zane_cpp wrapper w/ pure-Python fallback
+  memory/
+    rolling.py                    Short-term in-context rolling window
+    store.py                      SQLite durable storage (messages, summaries)
+    embeddings.py                  Local sentence-transformers embedding backend
+    vector_index.py                FAISS semantic-search index
+    summarizer.py                  LLM-driven summarization of aged-out history
+    persistent.py                  PersistentMemory: ties the above together
   tools/
     web_search.py                Tavily/DuckDuckGo search tool
     registry.py                   LLM function-calling schema + dispatch
   core.py                        ZaneMind: the orchestrator
+  control.py                     ZaneSensorInput / ZaneControlOutput seam (unimplemented)
   interfaces/
     base.py                      ZaneInterface abstract base class
     cli.py                        CLI adapter
     api.py                        FastAPI adapter
-    discord_bot.py                discord.py adapter
-  __main__.py                    `python -m zane --mode {cli,api,discord}`
+  __main__.py                    `python -m zane --mode {cli,api}`
 ```
 
 ### Why C++ + Python?
@@ -48,6 +54,54 @@ If the extension hasn't been built for the current platform,
 `zane/analytics_bridge.py` transparently falls back to a pure-Python
 reimplementation with an identical interface and identical math — the rest
 of the system never needs to know which backend is active.
+
+### Memory: rolling window + persistent retrieval-augmented recall
+
+Every `ZaneMind` session keeps two layers of memory, both owned by
+`zane.memory.persistent.PersistentMemory`:
+
+- **Rolling window** (`zane/memory/rolling.py`, unchanged from the
+  original design): the last N messages, sent verbatim as chat history on
+  every turn.
+- **Persistent, retrieval-augmented memory**: every message is written to
+  SQLite (`zane/memory/store.py`, `messages` + `summaries` tables)
+  immediately on send/receive, so history survives a process restart —
+  a new session backed by the same database file rebuilds its rolling
+  window from the most recent stored rows on startup. Each message is
+  also embedded locally via `sentence-transformers` (all-MiniLM-L6-v2, no
+  external API — see `zane/memory/embeddings.py`) and indexed in a FAISS
+  vector index (`zane/memory/vector_index.py`) keyed by the same SQLite
+  row ID. On every new user turn, the query is embedded and the top-k most
+  semantically relevant *older* messages (excluding anything already in
+  the rolling window) are retrieved and injected into the system prompt as
+  a distinct "RELEVANT PAST CONTEXT" block — separate from both the
+  rolling window and the "EARLIER CONVERSATION SUMMARY" block described
+  next (see `zane/personality.py`'s `build_system_prompt`).
+- **Background summarization + pruning**: once more raw messages sit
+  beyond a configurable retention window than a configurable threshold
+  (`ZANE_MEMORY_RETENTION_WINDOW` / `ZANE_MEMORY_SUMMARIZE_AFTER_N`), the
+  oldest chunk is condensed into a summary via an LLM call
+  (`zane/memory/summarizer.py`) and stored in `summaries`; only then are
+  the raw rows (and their vectors) pruned. If summarization fails for any
+  reason (Groq drop, empty completion), the raw messages are **retained**
+  and retried on the next turn — history is never silently destroyed.
+
+All of the above degrades gracefully rather than crashing the
+conversation: a failed embedding call, a cold-start empty history, or
+database lock contention (retried with backoff in `store.py`) all fall
+back to "no retrieved context this turn" instead of raising into
+`ZaneMind.respond()`.
+
+### Future integration seam: `zane/control.py`
+
+`ZaneSensorInput` and `ZaneControlOutput` in `zane/control.py` are typed,
+**unimplemented** abstract base classes — groundwork for a future
+driving-simulation or other actuated-system integration. Nothing in this
+codebase implements or wires them into `ZaneMind` yet; they exist purely
+so that future module has a clean seam to plug into without requiring any
+changes to the core orchestrator. `SensorReading` and `ControlCommand` are
+deliberately generic dataclasses (name/value/unit/timestamp + metadata)
+until a concrete driving-sim module defines its real fields.
 
 ## Setup
 
@@ -70,14 +124,11 @@ python -m zane --mode cli
 
 # REST API (FastAPI + uvicorn)
 uvicorn zane.interfaces.api:app --host 0.0.0.0 --port 8000
-
-# Discord bot (requires discord.py + DISCORD_BOT_TOKEN)
-python -m zane --mode discord
 ```
 
-CLI/Discord commands: `/humor` (or `!zane humor`) toggles the awkward
-dad-joke/literal-humor switch, `/reset` clears conversation memory, `/help`
-lists commands. The API exposes the same via `POST /command`.
+CLI commands: `/humor` toggles the awkward dad-joke/literal-humor switch,
+`/reset` clears conversation memory, `/help` lists commands. The API
+exposes the same via `POST /command`.
 
 ## Testing
 
@@ -87,13 +138,18 @@ pytest
 
 Tests exercise the personality prompt builder, the analytics engine (using
 whichever backend — native or pure-Python fallback — is available in the
-current environment), conversational memory trimming, and tool dispatch.
+current environment), rolling memory trimming, tool dispatch, and the
+persistent memory subsystem (SQLite write durability, FAISS retrieval
+ranking, summarization triggering, and pruning). The real
+sentence-transformers model requires downloading weights on first use;
+`tests/test_embeddings.py` skips its real-model assertions (rather than
+failing) in offline environments while still testing failure handling.
 
 ## Extending to a new surface
 
 Every deployment surface subclasses `zane.interfaces.base.ZaneInterface`
 and reuses `handle_message` / `handle_command` against a shared `ZaneMind`.
-To add a new host (a desktop app, a Slack bot, a web chat widget):
+To add a new host (a desktop app, a web chat widget):
 
 ```python
 from zane.core import ZaneMind

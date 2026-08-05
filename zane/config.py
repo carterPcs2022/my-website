@@ -2,7 +2,7 @@
 
 All values are sourced from environment variables (optionally loaded from a
 .env file via python-dotenv) so the same codebase runs unmodified across the
-CLI, Discord bot, and API deployments described in the task hooks.
+CLI and API deployments described in the task hooks.
 """
 from __future__ import annotations
 
@@ -69,18 +69,39 @@ class Settings:
         default_factory=lambda: _env_bool("ZANE_HUMOR_DEFAULT", False)
     )
 
-    # --- Memory ---
+    # --- Rolling in-context memory window ---
     memory_max_messages: int = field(default_factory=lambda: _env_int("ZANE_MEMORY_MAX_MESSAGES", 40))
     memory_max_chars: int = field(default_factory=lambda: _env_int("ZANE_MEMORY_MAX_CHARS", 24000))
+
+    # --- Persistent, retrieval-augmented memory ---
+    memory_db_path: str = field(
+        default_factory=lambda: os.getenv("ZANE_MEMORY_DB_PATH", "zane_memory.sqlite3")
+    )
+    memory_vector_index_path: str = field(
+        default_factory=lambda: os.getenv("ZANE_MEMORY_VECTOR_INDEX_PATH", "zane_memory.faiss")
+    )
+    memory_embedding_model: str = field(
+        default_factory=lambda: os.getenv("ZANE_MEMORY_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    )
+    memory_retrieval_top_k: int = field(
+        default_factory=lambda: _env_int("ZANE_MEMORY_RETRIEVAL_TOP_K", 5)
+    )
+    # How many of the most recent raw messages are always kept intact
+    # (never summarized/pruned), independent of the in-context rolling window.
+    memory_retention_window: int = field(
+        default_factory=lambda: _env_int("ZANE_MEMORY_RETENTION_WINDOW", 20)
+    )
+    # Once more than this many raw messages sit beyond the retention window,
+    # the oldest chunk is summarized via an LLM call and pruned.
+    memory_summarize_after_n: int = field(
+        default_factory=lambda: _env_int("ZANE_MEMORY_SUMMARIZE_AFTER_N", 20)
+    )
 
     # --- Analytics engine ---
     analytics_worker_threads: int = field(
         default_factory=lambda: _env_int("ZANE_ANALYTICS_WORKERS", 2)
     )
     analytics_seed: int = field(default_factory=lambda: _env_int("ZANE_ANALYTICS_SEED", 0))
-
-    # --- Discord (optional deployment) ---
-    discord_bot_token: Optional[str] = field(default_factory=lambda: os.getenv("DISCORD_BOT_TOKEN"))
 
     def validate_for_groq(self) -> None:
         if not self.groq_api_key:

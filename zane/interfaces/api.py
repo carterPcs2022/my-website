@@ -76,7 +76,7 @@ class SessionManager:
         if self._backend is None:
             raise RuntimeError("SessionManager used before startup().")
         if session_id not in self._sessions:
-            self._sessions[session_id] = ZaneMind(shared=self._backend)
+            self._sessions[session_id] = ZaneMind(shared=self._backend, session_id=session_id)
         return self._sessions[session_id]
 
     def drop(self, session_id: str) -> None:

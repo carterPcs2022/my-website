@@ -2,9 +2,9 @@
 
 The same `ZaneMind` engine (Groq + memory + tools + the C++ analytics
 bridge) powers every surface; only how messages arrive and get delivered
-changes. Concrete adapters in this package (CLI, API, Discord) are thin —
-new hosts (a desktop app, a web chat widget, a Slack bot) just need to
-subclass this and implement `start`/`stop`, reusing `handle_message` and
+changes. Concrete adapters in this package (CLI, API) are thin — new hosts
+(a desktop app, a web chat widget, a driving-sim control panel) just need
+to subclass this and implement `start`/`stop`, reusing `handle_message` and
 `handle_command` as-is.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Optional
 from zane.core import ZaneMind, TurnResult
 
 # Slash/bang commands shared across every interface, so "/humor" in the CLI
-# behaves identically to "!zane humor" in Discord or a REST call to /command.
+# behaves identically to a REST call to /command.
 _COMMAND_HELP = (
     "Available commands:\n"
     "  humor   — toggle Zane's dad-joke / literal-humor subroutine\n"

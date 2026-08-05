@@ -2,7 +2,6 @@
 
     python -m zane --mode cli
     python -m zane --mode api      # then: uvicorn zane.interfaces.api:app
-    python -m zane --mode discord
 """
 from __future__ import annotations
 
@@ -30,12 +29,6 @@ async def _main_async(mode: str) -> int:
         await run_cli(mind)
         return 0
 
-    if mode == "discord":
-        from zane.interfaces.discord_bot import run_discord_bot
-
-        await run_discord_bot(settings)
-        return 0
-
     if mode == "api":
         print(
             "The API surface runs under an ASGI server, not `python -m zane`.\n"
@@ -52,7 +45,7 @@ async def _main_async(mode: str) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Zane's digital mind.")
     parser.add_argument(
-        "--mode", choices=["cli", "api", "discord"], default="cli",
+        "--mode", choices=["cli", "api"], default="cli",
         help="Which deployment surface to launch (default: cli).",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
