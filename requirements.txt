@@ -1,0 +1,22 @@
+# Core
+groq>=0.11.0
+python-dotenv>=1.0.1
+pydantic>=2.7.0
+
+# Web search pipeline ("infinite information")
+ddgs>=9.0.0
+tavily-python>=0.5.0  # optional: used automatically if TAVILY_API_KEY is set
+
+# API deployment surface
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# Discord deployment surface (optional)
+discord.py>=2.4.0
+
+# C++ extension build
+pybind11>=2.12.0
+
+# Tests
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
