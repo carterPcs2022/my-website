@@ -9,13 +9,14 @@ import logging
 
 from zane.core import ZaneMind
 from zane.interfaces.base import ZaneInterface
+from zane.voice.playback import play_audio_bytes
 
 logger = logging.getLogger("zane.interfaces.cli")
 
 _BANNER = """\
 ==================================================================
   ZANE — Nindroid Digital Mind (CLI Interface)
-  Type your message and press Enter. Commands: /humor /reset /help /exit
+  Type your message and press Enter. Commands: /humor /voice /reset /help /exit
 ==================================================================\
 """
 
@@ -63,6 +64,9 @@ class CLIInterface(ZaneInterface):
                     ", ".join(result.tool_calls_made),
                     result.elapsed_ms,
                 )
+
+            if result.audio:
+                await play_audio_bytes(result.audio, result.audio_format)
 
         await self.stop()
 

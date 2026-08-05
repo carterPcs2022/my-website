@@ -12,6 +12,11 @@ sentence-transformers>=3.0.0
 faiss-cpu>=1.8.0
 numpy>=1.26.0
 
+# Voice (ElevenLabs text-to-speech), optional: sessions run text-only
+# without this installed or without ELEVENLABS_API_KEY/ZANE_VOICE_ID set.
+elevenlabs>=1.9.0
+httpx>=0.27.0
+
 # API deployment surface
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0

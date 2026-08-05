@@ -19,6 +19,7 @@ from zane.core import ZaneMind, TurnResult
 _COMMAND_HELP = (
     "Available commands:\n"
     "  humor   — toggle Zane's dad-joke / literal-humor subroutine\n"
+    "  voice   — toggle spoken (text-to-speech) responses\n"
     "  reset   — clear the current conversation memory\n"
     "  help    — show this message"
 )
@@ -62,6 +63,16 @@ class ZaneInterface(ABC):
             enabled = self.mind.humor.toggle()
             state = "ENGAGED" if enabled else "DISENGAGED"
             return f"Humor subroutine {state}. I shall adjust my dialogue accordingly."
+
+        if command in ("voice", "voice_mode", "speak"):
+            enabled = self.mind.voice.toggle()
+            if enabled and self.mind.tts is None:
+                return (
+                    "Voice subroutine ENGAGED, though I must note my speech synthesizer "
+                    "is not currently configured — I will continue responding in text only."
+                )
+            state = "ENGAGED" if enabled else "DISENGAGED"
+            return f"Voice subroutine {state}."
 
         if command == "reset":
             self.mind.reset_conversation()

@@ -103,6 +103,27 @@ class Settings:
     )
     analytics_seed: int = field(default_factory=lambda: _env_int("ZANE_ANALYTICS_SEED", 0))
 
+    # --- Voice (ElevenLabs text-to-speech) ---
+    elevenlabs_api_key: Optional[str] = field(
+        default_factory=lambda: os.getenv("ELEVENLABS_API_KEY")
+    )
+    # Never hardcode a voice ID — always sourced from the environment.
+    elevenlabs_voice_id: Optional[str] = field(default_factory=lambda: os.getenv("ZANE_VOICE_ID"))
+    elevenlabs_model_id: str = field(
+        default_factory=lambda: os.getenv("ZANE_VOICE_MODEL_ID", "eleven_multilingual_v2")
+    )
+    elevenlabs_output_format: str = field(
+        default_factory=lambda: os.getenv("ZANE_VOICE_OUTPUT_FORMAT", "mp3_44100_128")
+    )
+    elevenlabs_max_retries: int = field(
+        default_factory=lambda: _env_int("ZANE_VOICE_MAX_RETRIES", 4)
+    )
+    # Per-session voice toggle default. Deliberately OFF unless an operator
+    # explicitly opts in — text-only behavior must be unaffected either way.
+    voice_enabled_default: bool = field(
+        default_factory=lambda: _env_bool("ZANE_VOICE_DEFAULT", False)
+    )
+
     def validate_for_groq(self) -> None:
         if not self.groq_api_key:
             raise RuntimeError(

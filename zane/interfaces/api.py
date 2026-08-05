@@ -3,13 +3,29 @@
 Run with:  uvicorn zane.interfaces.api:app --host 0.0.0.0 --port 8000
 (or `python -m zane --mode api`)
 
-One `SharedBackend` (Groq client, C++ analytics engine, web search tool) is
-built once at startup and shared across every session; each `session_id`
-gets its own `ZaneMind` (i.e. its own conversation memory + humor toggle)
-lazily on first use.
+One `SharedBackend` (Groq client, C++ analytics engine, web search tool,
+optional ElevenLabs TTS client) is built once at startup and shared across
+every session; each `session_id` gets its own `ZaneMind` (i.e. its own
+conversation memory, humor toggle, and voice toggle) lazily on first use.
+
+Voice output design choice: when a session's voice toggle is on and
+synthesis succeeds, `POST /chat` includes the audio as a base64 string
+(`audio_base64` + `audio_format`) in the *same* JSON response as the text,
+rather than switching the endpoint's response type or exposing a separate
+streaming/binary route. One request/response pair per turn keeps the text
+and its audio atomically tied together with no risk of a client fetching
+audio for the wrong turn, and keeps a single, stable OpenAPI schema for
+`/chat` regardless of whether voice is on. The tradeoff is the ~33%
+size inflation base64 adds to the payload; for short spoken replies this
+is an acceptable cost for the simplicity. A dedicated binary
+`/chat/audio/{turn_id}` endpoint (returning `Response(media_type="audio/mpeg")`
+directly, for e.g. an HTML `<audio>` tag `src`) would be the natural next
+step if payload size or streaming playback becomes a real requirement, but
+isn't needed yet and isn't implemented here.
 """
 from __future__ import annotations
 
+import base64
 import logging
 from contextlib import asynccontextmanager
 from typing import Dict, Optional
@@ -37,6 +53,17 @@ class ChatResponse(BaseModel):
     tool_calls_made: list[str]
     elapsed_ms: float
     humor_enabled: bool
+    voice_enabled: bool
+    # Populated only when the session's voice toggle is on and synthesis
+    # succeeded; both are omitted/None otherwise (voice off, no TTS backend
+    # configured, or synthesis failed) — see the module docstring for why
+    # audio rides along in this same response instead of a separate route.
+    audio_base64: Optional[str] = Field(
+        None, description="Base64-encoded synthesized speech for `reply`, if voice is enabled."
+    )
+    audio_format: Optional[str] = Field(
+        None, description="ElevenLabs output_format string for audio_base64, e.g. 'mp3_44100_128'."
+    )
 
 
 class CommandRequest(BaseModel):
@@ -115,11 +142,16 @@ async def chat(req: ChatRequest) -> ChatResponse:
     except GroqUnavailableError as exc:
         raise HTTPException(status_code=503, detail=f"Zane's cognitive backend is unavailable: {exc}")
 
+    audio_base64 = base64.b64encode(result.audio).decode("ascii") if result.audio else None
+
     return ChatResponse(
         reply=result.text,
         tool_calls_made=result.tool_calls_made,
         elapsed_ms=result.elapsed_ms,
         humor_enabled=mind.humor.enabled,
+        voice_enabled=mind.voice.enabled,
+        audio_base64=audio_base64,
+        audio_format=result.audio_format if audio_base64 else None,
     )
 
 

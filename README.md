@@ -30,6 +30,10 @@ zane/                     High-level AI layer (Python)
     web_search.py                Tavily/DuckDuckGo search tool
     translate.py                  LLM-backed translation tool
     registry.py                   LLM function-calling schema + dispatch
+  voice/
+    tts.py                        Async ElevenLabs client + fallback helper
+    switch.py                     Per-session voice on/off toggle
+    playback.py                    CLI local audio playback (best-effort)
   core.py                        ZaneMind: the orchestrator
   control.py                     ZaneSensorInput / ZaneControlOutput seam (unimplemented)
   interfaces/
@@ -118,6 +122,39 @@ The `translate_text` tool (`zane/tools/translate.py`) is the one exception
 called out explicitly in the prompt: it's a real LLM-backed translation,
 not flavor, so no such caveat applies to it.
 
+### Voice: optional ElevenLabs text-to-speech
+
+Every `ZaneMind` session has a `voice` toggle (`zane/voice/switch.py`,
+default **OFF**) independent of the `humor` toggle. When on — and only
+when on — `respond()` runs one extra step after generating text:
+`zane.voice.tts.synthesize_with_fallback` calls the shared
+`AsyncElevenLabsClient` (`zane/voice/tts.py`, same exponential-backoff
+retry pattern as `AsyncGroqClient`) and returns `(audio_bytes,
+audio_format)`. Every failure mode — voice off, no `ELEVENLABS_API_KEY`/
+`ZANE_VOICE_ID` configured, the `elevenlabs` package not installed, or a
+synthesis call failing even after retries — degrades to `(None, None)`
+without raising, so a conversational turn can never be broken by TTS.
+`TurnResult.audio`/`audio_format` are `None` in every one of those cases,
+making text-only output byte-for-byte identical whether voice is
+unavailable or simply switched off.
+
+The voice ID is always read from `ZANE_VOICE_ID` (never hardcoded in
+source) so it can be swapped independently per deployment.
+
+- **CLI**: after printing the text reply, `zane/voice/playback.py` writes
+  the audio to a temp file and shells out to the first local player it
+  finds (`ffplay`, `mpv`, `mpg123`, `afplay`, `paplay`, `aplay`) —
+  deliberately not a new Python audio dependency for a short MP3 clip. No
+  player found just skips playback with a warning; it never crashes the
+  CLI turn.
+- **API**: `POST /chat` includes `audio_base64` + `audio_format` in the
+  *same* JSON response as `reply`, rather than switching response types or
+  adding a separate streaming route — see the design-choice note at the
+  top of `zane/interfaces/api.py` for the reasoning and the tradeoff
+  (~33% base64 size overhead, accepted for atomicity and a single stable
+  `/chat` schema). Toggle voice per session via `POST /command`
+  (`{"command": "voice"}`), same as `humor`.
+
 ### Future integration seam: `zane/control.py`
 
 `ZaneSensorInput` and `ZaneControlOutput` in `zane/control.py` are typed,
@@ -153,8 +190,9 @@ uvicorn zane.interfaces.api:app --host 0.0.0.0 --port 8000
 ```
 
 CLI commands: `/humor` toggles the awkward dad-joke/literal-humor switch,
-`/reset` clears conversation memory, `/help` lists commands. The API
-exposes the same via `POST /command`.
+`/voice` toggles spoken responses (see "Voice" above), `/reset` clears
+conversation memory, `/help` lists commands. The API exposes the same via
+`POST /command`.
 
 ## Testing
 
@@ -164,12 +202,15 @@ pytest
 
 Tests exercise the personality prompt builder, the analytics engine (using
 whichever backend — native or pure-Python fallback — is available in the
-current environment), rolling memory trimming, tool dispatch, and the
+current environment), rolling memory trimming, tool dispatch, the
 persistent memory subsystem (SQLite write durability, FAISS retrieval
-ranking, summarization triggering, and pruning). The real
-sentence-transformers model requires downloading weights on first use;
-`tests/test_embeddings.py` skips its real-model assertions (rather than
-failing) in offline environments while still testing failure handling.
+ranking, summarization triggering, and pruning), and voice synthesis
+(success path, retry-then-succeed, non-retryable and retry-exhausted
+failure, and the toggle-on/off fallback behavior — all against an injected
+fake SDK client, no real ElevenLabs calls). The real sentence-transformers
+model requires downloading weights on first use; `tests/test_embeddings.py`
+skips its real-model assertions (rather than failing) in offline
+environments while still testing failure handling.
 
 ## Extending to a new surface
 

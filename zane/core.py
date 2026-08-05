@@ -24,6 +24,8 @@ from zane.memory.vector_index import FaissVectorIndex
 from zane.personality import HumorSwitch, PersonaContext, build_system_prompt
 from zane.tools.registry import ToolRegistry
 from zane.tools.web_search import WebSearchTool
+from zane.voice.switch import VoiceSwitch
+from zane.voice.tts import AsyncElevenLabsClient, TextToSpeechError, synthesize_with_fallback
 
 logger = logging.getLogger("zane.core")
 
@@ -43,6 +45,11 @@ class TurnResult:
     text: str
     tool_calls_made: List[str]
     elapsed_ms: float
+    # Populated only when the session's voice toggle is on and synthesis
+    # succeeded; None in every other case (voice off, no TTS backend
+    # configured, or synthesis failed) — i.e. identical to text-only.
+    audio: Optional[bytes] = None
+    audio_format: Optional[str] = None
 
 
 @dataclass
@@ -63,6 +70,10 @@ class SharedBackend:
     embeddings: EmbeddingBackend
     vector_index: FaissVectorIndex
     summarizer: ConversationSummarizer
+    # None whenever ELEVENLABS_API_KEY/ZANE_VOICE_ID aren't configured, or
+    # the `elevenlabs` package isn't installed — voice then silently no-ops
+    # even if a session's VoiceSwitch is on (see synthesize_with_fallback).
+    tts: Optional[AsyncElevenLabsClient]
 
     @classmethod
     def build(cls, settings_obj: Settings) -> "SharedBackend":
@@ -90,6 +101,22 @@ class SharedBackend:
         vector_index = FaissVectorIndex(settings_obj.memory_vector_index_path)
         summarizer = ConversationSummarizer(groq)
 
+        tts: Optional[AsyncElevenLabsClient] = None
+        if settings_obj.elevenlabs_api_key and settings_obj.elevenlabs_voice_id:
+            try:
+                tts = AsyncElevenLabsClient(
+                    api_key=settings_obj.elevenlabs_api_key,
+                    voice_id=settings_obj.elevenlabs_voice_id,
+                    model_id=settings_obj.elevenlabs_model_id,
+                    output_format=settings_obj.elevenlabs_output_format,
+                    max_retries=settings_obj.elevenlabs_max_retries,
+                )
+            except (TextToSpeechError, ValueError) as exc:
+                logger.warning(
+                    "Voice synthesis unavailable, sessions will run text-only: %s", exc
+                )
+                tts = None
+
         return cls(
             analytics=analytics,
             web_search=web_search,
@@ -99,12 +126,15 @@ class SharedBackend:
             embeddings=embeddings,
             vector_index=vector_index,
             summarizer=summarizer,
+            tts=tts,
         )
 
     async def aclose(self) -> None:
         await self.groq.close()
         self.analytics.shutdown()
         self.memory_store.close()
+        if self.tts is not None:
+            await self.tts.close()
 
 
 class ZaneMind:
@@ -133,6 +163,7 @@ class ZaneMind:
 
         self.session_id = session_id or str(uuid.uuid4())
         self.humor = HumorSwitch(self.settings.humor_enabled_default)
+        self.voice = VoiceSwitch(self.settings.voice_enabled_default)
         self.memory = PersistentMemory(
             session_id=self.session_id,
             store=self._shared.memory_store,
@@ -163,6 +194,10 @@ class ZaneMind:
     @property
     def groq(self) -> AsyncGroqClient:
         return self._shared.groq
+
+    @property
+    def tts(self) -> Optional[AsyncElevenLabsClient]:
+        return self._shared.tts
 
     async def respond(
         self,
@@ -197,11 +232,17 @@ class ZaneMind:
                 completion = await self.groq.chat_completion(messages, tools=self.tools.schemas())
             except GroqUnavailableError as exc:
                 logger.error("Groq unavailable: %s", exc)
+                fallback_text = _OFFLINE_FALLBACK.format(detail=str(exc))
+                audio, audio_format = await synthesize_with_fallback(
+                    self.tts, self.voice.enabled, fallback_text
+                )
                 elapsed_ms = (time.monotonic() - start) * 1000
                 return TurnResult(
-                    text=_OFFLINE_FALLBACK.format(detail=str(exc)),
+                    text=fallback_text,
                     tool_calls_made=tool_calls_made,
                     elapsed_ms=elapsed_ms,
+                    audio=audio,
+                    audio_format=audio_format,
                 )
 
             message = completion.choices[0].message
@@ -237,17 +278,32 @@ class ZaneMind:
 
             final_text = message.content or ""
             await self.memory.add_assistant_message(final_text)
+            audio, audio_format = await synthesize_with_fallback(
+                self.tts, self.voice.enabled, final_text
+            )
             elapsed_ms = (time.monotonic() - start) * 1000
-            return TurnResult(text=final_text, tool_calls_made=tool_calls_made, elapsed_ms=elapsed_ms)
+            return TurnResult(
+                text=final_text,
+                tool_calls_made=tool_calls_made,
+                elapsed_ms=elapsed_ms,
+                audio=audio,
+                audio_format=audio_format,
+            )
 
+        exhausted_text = (
+            "I apologize; I was unable to resolve this within my allotted "
+            "analytical cycles. Might I suggest rephrasing your request?"
+        )
+        audio, audio_format = await synthesize_with_fallback(
+            self.tts, self.voice.enabled, exhausted_text
+        )
         elapsed_ms = (time.monotonic() - start) * 1000
         return TurnResult(
-            text=(
-                "I apologize; I was unable to resolve this within my allotted "
-                "analytical cycles. Might I suggest rephrasing your request?"
-            ),
+            text=exhausted_text,
             tool_calls_made=tool_calls_made,
             elapsed_ms=elapsed_ms,
+            audio=audio,
+            audio_format=audio_format,
         )
 
     async def stream_respond(self, user_input: str, *, addressed_by: Optional[str] = None):
