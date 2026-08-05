@@ -59,6 +59,22 @@ def test_no_memory_blocks_when_context_has_none():
     assert "RELEVANT PAST CONTEXT" not in prompt
 
 
+def test_flavor_guidance_always_present_regardless_of_toggles():
+    for humor_enabled in (True, False):
+        for tools_enabled in (True, False):
+            prompt = build_system_prompt(humor_enabled=humor_enabled, tools_enabled=tools_enabled)
+            assert "CHARACTER FLAVOR VS. REAL CAPABILITIES" in prompt
+            assert "DIGITAL MIND BACKSTORY" in prompt
+            assert "ADVANCED SCANNING" in prompt
+            assert "FAST CALCULATIONS" in prompt
+
+
+def test_flavor_guidance_disclaims_scanning_and_probability_as_non_real():
+    prompt = build_system_prompt()
+    assert "No real biometric sensing or lie detection exists" in prompt
+    assert "not statistically validated predictions" in prompt
+
+
 def test_humor_switch_toggle():
     switch = HumorSwitch(enabled=False)
     assert switch.enabled is False

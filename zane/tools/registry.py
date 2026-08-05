@@ -8,6 +8,8 @@ import logging
 from typing import Any, Dict, List
 
 from zane.analytics_bridge import AnalyticsEngine, ProbabilityFactors
+from zane.groq_client import AsyncGroqClient
+from zane.tools.translate import TRANSLATE_TOOL_SCHEMA, translate_text
 from zane.tools.web_search import WEB_SEARCH_TOOL_SCHEMA, WebSearchTool
 
 logger = logging.getLogger("zane.tools.registry")
@@ -63,12 +65,15 @@ class ToolRegistry:
     """Owns tool schemas (for the Groq API request) and tool dispatch (for
     executing a tool_call the model returned)."""
 
-    def __init__(self, analytics: AnalyticsEngine, web_search: WebSearchTool) -> None:
+    def __init__(
+        self, analytics: AnalyticsEngine, web_search: WebSearchTool, groq_client: AsyncGroqClient
+    ) -> None:
         self._analytics = analytics
         self._web_search = web_search
+        self._groq_client = groq_client
 
     def schemas(self) -> List[Dict[str, Any]]:
-        return [WEB_SEARCH_TOOL_SCHEMA, CALCULATE_PROBABILITY_TOOL_SCHEMA]
+        return [WEB_SEARCH_TOOL_SCHEMA, CALCULATE_PROBABILITY_TOOL_SCHEMA, TRANSLATE_TOOL_SCHEMA]
 
     async def dispatch(self, name: str, arguments_json: str) -> str:
         """Executes a single tool call and returns its string result, ready
@@ -101,6 +106,11 @@ class ToolRegistry:
                     f"{result.confidence_interval_high:.2f}%], "
                     f"methodology={result.analytical_summary}"
                 )
+
+            if name == "translate_text":
+                text = args["text"]
+                target_language = args["target_language"]
+                return await translate_text(text, target_language, self._groq_client)
 
             return f"TOOL_ERROR: unknown tool '{name}'"
         except Exception as exc:  # noqa: BLE001 - tool failures must not crash the chat loop

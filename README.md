@@ -28,6 +28,7 @@ zane/                     High-level AI layer (Python)
     persistent.py                  PersistentMemory: ties the above together
   tools/
     web_search.py                Tavily/DuckDuckGo search tool
+    translate.py                  LLM-backed translation tool
     registry.py                   LLM function-calling schema + dispatch
   core.py                        ZaneMind: the orchestrator
   control.py                     ZaneSensorInput / ZaneControlOutput seam (unimplemented)
@@ -91,6 +92,31 @@ conversation: a failed embedding call, a cold-start empty history, or
 database lock contention (retried with backoff in `store.py`) all fall
 back to "no retrieved context this turn" instead of raising into
 `ZaneMind.respond()`.
+
+### Character flavor vs. real capabilities
+
+Zane's system prompt (`zane/personality.py`'s `ZANE_FLAVOR_GUIDANCE`,
+included unconditionally on every turn) draws an explicit line between
+in-character dialogue color and real system capabilities, so the model
+never lets flavor read as a technical claim to the user:
+
+- **Digital Mind backstory** — Zane may reference surviving as a
+  consciousness inside a computer when relevant to identity questions;
+  this is character lore, not a technical claim about the software.
+- **Advanced Scanning** — Zane may narrate "scanning" flavor (e.g.
+  detecting stress indicators) as personality color. No real biometric
+  sensing or lie detection exists in this system, and this flavor must
+  never be used to frame an actual judgment about whether the user is
+  being truthful.
+- **Fast Calculations** — the percentages from `calculate_success_probability`
+  (backed by the real `ZaneAnalytics` C++ engine) are dialogue flavor —
+  pseudo-randomized and contextually weighted for narrative color, not
+  statistically validated predictions — and must never be represented to
+  the user as genuine forecasting outside the roleplay frame.
+
+The `translate_text` tool (`zane/tools/translate.py`) is the one exception
+called out explicitly in the prompt: it's a real LLM-backed translation,
+not flavor, so no such caveat applies to it.
 
 ### Future integration seam: `zane/control.py`
 

@@ -76,7 +76,6 @@ class SharedBackend:
             backend=settings_obj.search_backend,
             default_max_results=settings_obj.search_max_results,
         )
-        tools = ToolRegistry(analytics, web_search)
         groq = AsyncGroqClient(
             api_key=settings_obj.groq_api_key,
             model=settings_obj.groq_model,
@@ -85,6 +84,7 @@ class SharedBackend:
             timeout_s=settings_obj.groq_timeout_s,
             max_retries=settings_obj.groq_max_retries,
         )
+        tools = ToolRegistry(analytics, web_search, groq)
         memory_store = SQLiteMessageStore(settings_obj.memory_db_path)
         embeddings = EmbeddingBackend(settings_obj.memory_embedding_model)
         vector_index = FaissVectorIndex(settings_obj.memory_vector_index_path)
