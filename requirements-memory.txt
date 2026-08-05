@@ -1,0 +1,7 @@
+# Persistent, retrieval-augmented memory stack. Heavy — sentence-transformers
+# pulls in torch. Skip this file (e.g. `docker build --build-arg
+# INSTALL_MEMORY_EXTRAS=false`) on constrained build environments; Zane
+# still runs fully, just without semantic memory retrieval.
+sentence-transformers>=3.0.0
+faiss-cpu>=1.8.0
+numpy>=1.26.0

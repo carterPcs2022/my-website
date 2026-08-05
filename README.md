@@ -41,6 +41,9 @@ zane/                     High-level AI layer (Python)
     cli.py                        CLI adapter
     api.py                        FastAPI adapter
   __main__.py                    `python -m zane --mode {cli,api}`
+
+Dockerfile / render.yaml     Container deployment (see "Deploying to Render")
+requirements-core.txt        Light deps; requirements-memory.txt adds the heavy RAG stack
 ```
 
 ### Why C++ + Python?
@@ -193,6 +196,40 @@ CLI commands: `/humor` toggles the awkward dad-joke/literal-humor switch,
 `/voice` toggles spoken responses (see "Voice" above), `/reset` clears
 conversation memory, `/help` lists commands. The API exposes the same via
 `POST /command`.
+
+## Deploying to Render
+
+Only the API surface makes sense as a hosted deployment — the CLI needs
+an interactive terminal, which a Render web service doesn't give you.
+`Dockerfile` and `render.yaml` are set up for exactly this.
+
+1. In the Render dashboard: **New +** -> **Blueprint**, point it at this
+   repo/branch. Render reads `render.yaml` and creates a Docker-based web
+   service running `zane.interfaces.api:app`.
+2. Render will prompt for every env var marked `sync: false` in
+   `render.yaml` (`GROQ_API_KEY` required; `TAVILY_API_KEY`,
+   `ELEVENLABS_API_KEY`, `ZANE_VOICE_ID` optional) — set them there, in
+   Render's dashboard. Never in this repo, never pasted in chat.
+3. Deploy. `/health` is wired as the health check path.
+
+**If the build is too slow/heavy for your Render plan**: the C++
+extension compiles fine on Render's standard build machines, but
+`sentence-transformers` pulls in `torch`, which is the single heaviest
+part of the image. Set the Docker build arg `INSTALL_MEMORY_EXTRAS=false`
+(Render dashboard -> service -> Settings -> Build, or add it under
+`dockerCommand`/build args in `render.yaml`) to skip
+`requirements-memory.txt` entirely — Zane still runs fully; only semantic
+memory retrieval and background summarization go quiet (see "Memory"
+above; `PersistentMemory` was built to degrade gracefully for exactly this
+kind of case, not just for missing network access).
+
+**Persistent memory across restarts**: Render web services have an
+*ephemeral* filesystem by default — `ZANE_MEMORY_DB_PATH` and
+`ZANE_MEMORY_VECTOR_INDEX_PATH` will be wiped on every deploy/restart
+unless you attach a Render persistent Disk (a paid feature) and point
+those two env vars at a path under its mount. Without one, Zane still
+works correctly within a single running instance's lifetime — it just
+starts fresh each time the container restarts.
 
 ## Testing
 

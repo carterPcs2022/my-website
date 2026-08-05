@@ -1,0 +1,29 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# In the Render dashboard: New + -> Blueprint -> point at this repo/branch.
+# Every `sync: false` var is a secret Render will prompt you for in the
+# dashboard instead of reading from this file — none of them are ever
+# committed here.
+services:
+  - type: web
+    name: zane-digital-mind
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: SEARCH_BACKEND
+        value: auto
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ZANE_VOICE_ID
+        sync: false
+      - key: ZANE_VOICE_DEFAULT
+        value: "false"
+      - key: ZANE_HUMOR_DEFAULT
+        value: "false"
