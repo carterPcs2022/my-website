@@ -136,6 +136,11 @@ never lets flavor read as a technical claim to the user:
   pseudo-randomized and contextually weighted for narrative color, not
   statistically validated predictions — and must never be represented to
   the user as genuine forecasting outside the roleplay frame.
+- **Spinjitzu Combat Narration** — Zane may narrate performing Spinjitzu
+  or other physical combat action in descriptive prose during a roleplay
+  scenario. This is narrative color, not a claim that any physical motion
+  is actually occurring — he has no body performing these actions in the
+  conversation itself, only in its fiction.
 
 The `translate_text` tool (`zane/tools/translate.py`) is the one exception
 called out explicitly in the prompt: it's a real LLM-backed translation,
@@ -383,8 +388,10 @@ python -m zane.knowledge_manager data/raw_lore.txt
 ```
 
 `data/raw_lore.txt` (committed) is real source lore content — Destiny's
-Bounty (including its treaded "Land Bounty" land-traversal configuration)
-and Zane's own background — the compiled `.index`/`.json` are gitignored
+Bounty (including its treaded "Land Bounty" land-traversal configuration),
+Zane's own background, Spinjitzu, Sensei Wu, the four Golden Weapons, the
+rest of the team's roster (Kai, Jay, Cole, Lloyd, Nya), and Zane's
+Titanium Ninja rebuild — the compiled `.index`/`.json` are gitignored
 build artifacts, like `zane_cpp.so`; run the command above locally to
 generate them (requires network access the first time, to download the
 sentence-transformers model — unavailable in this project's own sandbox,
