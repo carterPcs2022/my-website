@@ -265,6 +265,17 @@ class Settings:
         default_factory=lambda: _env_float("WOLFRAM_TIMEOUT_S", 10.0)
     )
 
+    # --- P.I.X.A.L. companion bridge (zane/companion_bridge.py) ---
+    # Dual-voice routing: P.I.X.A.L.'s anomaly notices are synthesized on
+    # this voice, distinct from ZANE_VOICE_ID, via the same
+    # AsyncElevenLabsClient (see synthesize_with_fallback's `voice_id`
+    # override) rather than a second TTS client. Never hardcode this —
+    # env-only, like every other voice ID in this project.
+    pixal_voice_id: Optional[str] = field(default_factory=lambda: os.getenv("PIXAL_VOICE_ID"))
+    pixal_battery_voltage_threshold_v: float = field(
+        default_factory=lambda: _env_float("ZANE_PIXAL_BATTERY_VOLTAGE_THRESHOLD_V", 10.5)
+    )
+
     def validate_for_groq(self) -> None:
         if not self.groq_api_key:
             raise RuntimeError(

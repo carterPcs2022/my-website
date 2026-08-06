@@ -38,7 +38,10 @@ zane/                     High-level AI layer (Python)
     switch.py                     Per-session voice on/off toggle
     playback.py                    CLI local audio playback (best-effort)
   core.py                        ZaneMind: the orchestrator
+  companion_bridge.py            P.I.X.A.L. companion agent + NeuralBridge anomaly injection
   control.py                     ZaneSensorInput / ZaneControlOutput seam + vehicle telemetry connector
+  amphibious_bounty.py           Season 14 Amphibious Bounty: flight/surface/submerged autopilot
+  shuricopter_flight.py           ShuriCopter automated flight controller (12x scale of set 70673)
   thermal_monitor.py             Ice Protocol: real host thermal safety governor
   falcon_worker.py                Falcon Scout: system health daemon -> self-recall memory
   hardware/                      Physical robot integration (opt-in, see "Physical hardware")
@@ -190,6 +193,97 @@ triggers `emergency_stop()` immediately, bypassing the normal decision
 math. `InMemoryVehicleSensor`/`InMemoryVehicleControlSink` are reference
 implementations a real sim integration replaces; nothing here is wired
 into `ZaneMind` — it's a standalone loop a driving-sim host would run.
+
+### Amphibious Bounty autopilot: `zane/amphibious_bounty.py`
+
+The Season 14 Amphibious Destiny's Bounty's dual-mode (flight/surface/
+submerged) transformation engine, built on the same `Generic`
+`ZaneSensorInput`/`ZaneControlOutput` seam as `control.py` above (its own
+`InMemoryAmphibiousSensor`/`InMemoryAmphibiousControlSink` reference
+implementations register `AmphibiousTelemetry`/`AmphibiousControlOutput`
+into that pipeline) — and, like `control.py`'s own `TelemetryLoop`, not
+wired into `SharedBackend`/`ZaneMind.respond()`, since there's no live
+amphibious simulator feeding this project's actual chat deployment.
+`AmphibiousAutopilot.process_control_step()` routes to one of three
+regimes: FLIGHT runs classic multi-rotor vertical leveling with a hard
+25° pitch/roll safeguard; SUBMERGED runs proportional ballast control
+(`ballast_pump_engagement`, -1.0 blow/1.0 flood) and *entirely* disables
+the flight fields (they stay at their dataclass `None` default, not just
+a comment saying so); SURFACE is neutral station-keeping. A hard-coded
+critical depth alarm — 150.0m, the vehicle's real maximum structural
+depth — overrides whatever the ballast control loop would have commanded
+and fires a genuine emergency-surface-blow relay through the same
+`HardwareAbstractionLayer` every other physical actuator in this project
+uses (`hal.digital_write`), with the same guaranteed `finally`-block
+relay shutoff `peripheral_io.py`'s cryo-discharge tool uses — a mid-blow
+exception can never leave the relay energized. Defaults to `MockHAL` if
+no HAL is supplied, so this logs safely in this project's actual cloud
+deployment and in tests without ever touching real hardware. One
+deliberate, documented deviation from the literal spec: the spec's
+`process_control_step` was written to return `Any`; this returns the
+concrete `AmphibiousControlOutput` dataclass instead, since strict
+type-hinting is a standing project requirement that outranks a
+placeholder return type.
+
+### ShuriCopter flight controller: `zane/shuricopter_flight.py`
+
+A 12x real-world scale of the LEGO 70673 technical assembly, same
+standalone seam as the modules above (`InMemoryShuriCopterSensor`/
+`InMemoryShuriCopterControlSink`). `ShuriCopterAutopilot.process_flight_step()`
+runs linear altitude tracking against `ground_clearance_m` (the only
+altitude-like signal the telemetry schema provides) with a +15% ground-
+effect thrust multiplier below 2m clearance, a hard 25°pitch/20°roll tilt
+safeguard that force-clamps the cyclic vectors to prevent a frame flip,
+and yaw-rate damping via a genuinely circular-aware delta calculation
+(`_circular_delta_deg`) — the same 359°/1° wraparound fix
+`hardware/sensory_localization.py` already uses for acoustic
+direction-of-arrival smoothing, reused here so a naive linear
+current-minus-previous calculation doesn't read a true +2° heading change
+as a -358° swing and slam the tail rotor to its clamp. `ice_blaster_armed`
+reflects external target-acquisition/override state (set via
+`set_target_acquired`/`set_external_override`, since the spec's
+`process_flight_step(self, telemetry)` signature leaves no room for
+per-call arguments) and, on the rising edge, relays an actual discharge
+request to `PeripheralManager.engage_cryo_discharge` — which keeps its
+own hard arm/duration/cooldown gate as the real safety boundary; this
+controller's judgment about *when* to ask is never trusted as that
+boundary, exactly as an LLM's tool call isn't.
+
+### P.I.X.A.L. companion bridge: `zane/companion_bridge.py`
+
+P.I.X.A.L. runs as her own independent agent persona — her own dynamic
+system prompt (`build_pixal_system_prompt`) — rather than a second Groq
+connection: `PixalSystemsCore` reuses Zane's existing `AsyncGroqClient`
+(its retry/backoff/auth plumbing would just be duplicated for no
+behavioral benefit), and her `analyze_vehicle_telemetry(metrics)` method
+is deterministic threshold-rule detection, not an LLM call — the same
+reasoning `falcon_worker.py` uses for its own detection: she has to keep
+monitoring even if Groq itself is the thing having problems. Breaches
+(API latency from Falcon Scout, battery voltage or depth from the vehicle
+autopilots above) become `VehicleAnomaly` records flagged onto a
+`NeuralBridge`, a bounded async queue with a drop-oldest-on-overflow
+policy. Every turn, `ZaneMind.respond()` calls
+`neural_bridge.inject_into_prompt()` right before building the final
+system prompt, which drains anything pending and appends it as an exact
+`[COMPANION_SYS_NOTICE]: P.I.X.A.L. reports...`-tagged block — so Zane
+sees her findings and can relay them, but they're never written into
+memory as if Zane said them himself. `NeuralBridge` is deliberately
+deadlock-resistant: its `threading.Lock` only ever guards a single
+attribute read/write, never an await, and cross-thread flagging
+(`flag_anomaly_threadsafe`, for a caller running on a background thread
+rather than the event loop) goes through
+`asyncio.run_coroutine_threadsafe` rather than blocking.
+
+**Dual voice**: when a notice was pending this turn, `ZaneMind.respond()`
+synthesizes it concurrently with Zane's own response via `asyncio.gather`
+— her audio never blocks or delays his. Rather than standing up a second
+`AsyncElevenLabsClient`, `synthesize_with_fallback` gained an optional
+`voice_id` override parameter, so her notices reuse Zane's exact same
+client/retry/backoff machinery, just routed to `PIXAL_VOICE_ID` instead of
+`ZANE_VOICE_ID`. `TurnResult.companion_audio`/`companion_audio_format`
+are `None` whenever there's nothing pending, `PIXAL_VOICE_ID` isn't
+configured, or voice is off — identical fallback shape to Zane's own
+`audio` field.
 
 ### Ice Protocol: `zane/thermal_monitor.py`
 
@@ -526,6 +620,25 @@ non-200, empty response, network error, missing app ID) and the full
 `query_wolfram_alpha` fallback chain down to the local `ast`-based
 evaluator, including that it rejects real code-injection payloads and
 never fabricates an answer for a query it can't resolve.
+
+The two new vehicle autopilots (`tests/test_amphibious_bounty.py`,
+`tests/test_shuricopter_flight.py`) exercise all three Bounty regimes
+(including that SUBMERGED genuinely leaves the flight fields at `None`,
+not just claims to), the critical-depth alarm's real relay
+fire-and-guaranteed-shutoff against a spied `MockHAL`, the ballast sign
+convention (deeper-than-target must blow, not flood — an actual bug
+caught and fixed while writing these tests), the ShuriCopter's ground-
+effect multiplier, tilt-safeguard clamping, the circular yaw-wrap fix
+specifically at the 359°/1° boundary, and the ice-blaster's
+rising-edge-only trigger into a real `PeripheralManager`. Both modules'
+`Generic` `ZaneSensorInput`/`ZaneControlOutput` reference implementations
+are round-tripped the same way `control.py`'s own are. The companion
+bridge (`tests/test_companion_bridge.py`) tests `NeuralBridge`'s bounded
+drop-oldest queue, prompt injection with the exact
+`[COMPANION_SYS_NOTICE]:` tag, cross-thread anomaly flagging against a
+real `threading.Thread` (not just the async-native path), and
+`PixalSystemsCore`'s deterministic threshold detection across all three
+metric sources plus its honest-failure path on malformed input.
 
 ## Extending to a new surface
 

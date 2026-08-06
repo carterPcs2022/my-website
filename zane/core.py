@@ -12,9 +12,11 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
+from zane.amphibious_bounty import BOUNTY_MAX_STRUCTURAL_DEPTH_M
 from zane.analytics_bridge import AnalyticsEngine, DataStreamFrame
+from zane.companion_bridge import NeuralBridge, PixalSystemsCore
 from zane.config import Settings, settings as default_settings
 from zane.falcon_worker import (
     FalconWorker,
@@ -67,6 +69,13 @@ class TurnResult:
     # configured, or synthesis failed) — i.e. identical to text-only.
     audio: Optional[bytes] = None
     audio_format: Optional[str] = None
+    # Populated only when P.I.X.A.L. had a pending anomaly notice this turn
+    # AND voice is on AND PIXAL_VOICE_ID is configured — her own
+    # independent audio stream, distinct from Zane's `audio` above (see
+    # zane/companion_bridge.py and synthesize_with_fallback's `voice_id`
+    # override). None in every other case.
+    companion_audio: Optional[bytes] = None
+    companion_audio_format: Optional[str] = None
 
 
 @dataclass
@@ -129,6 +138,12 @@ class SharedBackend:
     # advertised even without WOLFRAM_APP_ID, degrading to a local
     # restricted-arithmetic fallback (see zane/tools/wolfram_tool.py).
     wolfram_client: WolframAlphaClient
+    # P.I.X.A.L. companion bridge (zane/companion_bridge.py): always
+    # present — cheap, no external dependencies. `neural_bridge` carries
+    # her anomaly notices into every turn's system prompt regardless of
+    # whether anything has ever flagged one.
+    neural_bridge: NeuralBridge
+    pixal: PixalSystemsCore
 
     @classmethod
     def build(cls, settings_obj: Settings) -> "SharedBackend":
@@ -220,6 +235,26 @@ class SharedBackend:
             app_id=settings_obj.wolfram_app_id, timeout_s=settings_obj.wolfram_timeout_s
         )
 
+        neural_bridge = NeuralBridge()
+        try:
+            neural_bridge.bind_loop(asyncio.get_running_loop())
+        except RuntimeError:
+            # Constructed outside a running event loop (e.g. a sync test
+            # harness) — cross-thread flagging is simply unavailable until
+            # something calls bind_loop() itself; the async-native
+            # flag_anomaly path still works fine either way.
+            logger.debug(
+                "SharedBackend.build() called outside a running event loop; "
+                "NeuralBridge loop binding deferred."
+            )
+        pixal = PixalSystemsCore(
+            groq,
+            neural_bridge,
+            latency_threshold_ms=settings_obj.falcon_scout_latency_threshold_ms,
+            battery_voltage_threshold_v=settings_obj.pixal_battery_voltage_threshold_v,
+            critical_depth_threshold_m=BOUNTY_MAX_STRUCTURAL_DEPTH_M,
+        )
+
         tools = ToolRegistry(analytics, web_search, groq, peripheral_manager, wolfram_client)
 
         tts: Optional[AsyncElevenLabsClient] = None
@@ -309,6 +344,8 @@ class SharedBackend:
             shared_humor_switch=shared_humor_switch,
             knowledge_manager=knowledge_manager,
             wolfram_client=wolfram_client,
+            neural_bridge=neural_bridge,
+            pixal=pixal,
         )
 
     async def aclose(self) -> None:
@@ -413,6 +450,14 @@ class ZaneMind:
     def knowledge_manager(self) -> KnowledgeManager:
         return self._shared.knowledge_manager
 
+    @property
+    def neural_bridge(self) -> NeuralBridge:
+        return self._shared.neural_bridge
+
+    @property
+    def pixal(self) -> PixalSystemsCore:
+        return self._shared.pixal
+
     async def _set_led_state(self, state: str) -> None:
         """Best-effort reflection of Zane's operational mode on the
         NeoPixel ring — never allowed to break a conversational turn. A
@@ -436,6 +481,25 @@ class ZaneMind:
         if vision_pipeline is None:
             return None
         return vision_pipeline.get_latest_hud()
+
+    async def _maybe_synthesize_companion_notice(
+        self, notice_text: Optional[str]
+    ) -> Tuple[Optional[bytes], Optional[str]]:
+        """P.I.X.A.L.'s dual-voice routing: reuses Zane's own
+        AsyncElevenLabsClient (see synthesize_with_fallback's `voice_id`
+        override) rather than a second TTS client, so there is no
+        duplicate retry/backoff/auth plumbing to maintain. No-ops (None,
+        None) whenever there's nothing pending, PIXAL_VOICE_ID isn't
+        configured, or voice is off — identical fallback shape to Zane's
+        own synthesis path."""
+        if not notice_text:
+            return None, None
+        pixal_voice_id = self.settings.pixal_voice_id
+        if not pixal_voice_id:
+            return None, None
+        return await synthesize_with_fallback(
+            self.tts, self.voice.enabled, notice_text, voice_id=pixal_voice_id
+        )
 
     async def respond(
         self,
@@ -483,6 +547,14 @@ class ZaneMind:
         )
         system_prompt = build_system_prompt(
             humor_enabled=self.humor.enabled, tools_enabled=True, context=context
+        )
+        # P.I.X.A.L. companion bridge: fold in any anomaly notices she's
+        # flagged since the last turn before Zane's Groq client fires —
+        # see zane/companion_bridge.py. companion_notice_text is kept
+        # separately so it can also be synthesized on her own voice
+        # stream below, independent of Zane's own response audio.
+        system_prompt, companion_notice_text = await self._shared.neural_bridge.inject_into_prompt(
+            system_prompt
         )
 
         for _round in range(max_tool_rounds):
@@ -540,8 +612,12 @@ class ZaneMind:
             final_text = message.content or ""
             await self.memory.add_assistant_message(final_text)
             await self._set_led_state("SPEAKING")
-            audio, audio_format = await synthesize_with_fallback(
-                self.tts, self.voice.enabled, final_text
+            # Zane's own response and P.I.X.A.L.'s pending notice (if any)
+            # are synthesized concurrently — her audio stream never blocks
+            # or delays Zane's main terminal output, and vice versa.
+            (audio, audio_format), (companion_audio, companion_audio_format) = await asyncio.gather(
+                synthesize_with_fallback(self.tts, self.voice.enabled, final_text),
+                self._maybe_synthesize_companion_notice(companion_notice_text),
             )
             elapsed_ms = (time.monotonic() - start) * 1000
             return TurnResult(
@@ -550,6 +626,8 @@ class ZaneMind:
                 elapsed_ms=elapsed_ms,
                 audio=audio,
                 audio_format=audio_format,
+                companion_audio=companion_audio,
+                companion_audio_format=companion_audio_format,
             )
 
         exhausted_text = (

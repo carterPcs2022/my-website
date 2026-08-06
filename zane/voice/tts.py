@@ -163,16 +163,29 @@ class AsyncElevenLabsClient:
 
 
 async def synthesize_with_fallback(
-    client: Optional[AsyncElevenLabsClient], enabled: bool, text: str
+    client: Optional[AsyncElevenLabsClient],
+    enabled: bool,
+    text: str,
+    *,
+    voice_id: Optional[str] = None,
 ) -> Tuple[Optional[bytes], Optional[str]]:
     """The single "optional post-processing step" every text response
     passes through. Never raises: a disabled toggle, a missing/unconfigured
     backend, or a synthesis failure all fall back to (None, None) — i.e.
-    text-only output, exactly as if voice were off."""
+    text-only output, exactly as if voice were off.
+
+    `voice_id` is an optional per-call override of the client's own
+    default voice — this is the whole dual-voice mechanism for P.I.X.A.L.
+    (see zane/companion_bridge.py and zane/core.py): her notices reuse
+    this exact same AsyncElevenLabsClient (and its retry/backoff/auth
+    plumbing) rather than a second client instance, routed to
+    `PIXAL_VOICE_ID` instead of Zane's `ZANE_VOICE_ID` purely via this
+    parameter.
+    """
     if not enabled or client is None or not text or not text.strip():
         return None, None
     try:
-        audio = await client.synthesize(text)
+        audio = await client.synthesize(text, voice_id=voice_id)
         return audio, client.output_format
     except TextToSpeechError as exc:
         logger.warning("Voice synthesis failed, falling back to text-only: %s", exc)
