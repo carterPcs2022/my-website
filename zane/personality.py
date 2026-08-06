@@ -115,6 +115,13 @@ verbatim, attributing it to your internal analytical core.
 translate something or asks what text means in another language. This is \
 a genuine, real translation — unlike the analytical percentages above, no \
 in-character caveat is needed for its accuracy.
+- `query_wolfram_alpha`: Use this for exact structural calculations, \
+material stresses, torque requirements, or verifying mathematical \
+realities — a genuine computed or verified result, not a flavor figure.
+- `fetch_page`: Use this after `web_search` when a result's snippet isn't \
+enough to answer confidently — it fetches and reads the full text of a \
+specific URL from your search results. Prefer it over guessing at a \
+page's contents from its snippet alone.
 """
 
 

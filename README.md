@@ -29,7 +29,8 @@ zane/                     High-level AI layer (Python)
     memory_defragmenter.py         RAG conflict detection + resolution (opt-in)
   knowledge_manager.py            Multi-namespace RAG: chat memory + static archival lore
   tools/
-    web_search.py                Tavily/DuckDuckGo search tool
+    web_search.py                Tavily/SerpAPI/Serper/DuckDuckGo search tool
+    fetch_page.py                  Full-page reader tool (SSRF-guarded)
     translate.py                  LLM-backed translation tool
     wolfram_tool.py                Wolfram|Alpha analytical math tool + safe local fallback
     registry.py                   LLM function-calling schema + dispatch
@@ -437,6 +438,52 @@ Unlike `engage_cryo_discharge`, this tool is always advertised/available
 since it degrades to something genuinely useful rather than needing a
 hardware safety gate.
 
+### Reading full pages: `zane/tools/fetch_page.py`
+
+`web_search` only ever returns titled snippets, so Zane could easily
+"answer" from a two-line summary that doesn't actually support the claim.
+`fetch_page` closes that gap: given a URL (typically one from a prior
+`web_search` result), it fetches the page and extracts its readable text
+via a small, dependency-free HTML-to-text parser built on the stdlib
+`html.parser.HTMLParser` — deliberately not a new `beautifulsoup4`
+dependency for something this scoped, consistent with the project's bias
+toward minimal deps. Content is capped (6000 chars by default,
+`FETCH_PAGE_MAX_CHARS`) and clearly marked `[Content truncated.]` when
+cut, so a long article never blows the context budget silently.
+
+**Security note (SSRF):** a fetch tool the LLM can call with an arbitrary
+URL is a textbook Server-Side Request Forgery vector — a crafted or
+attacker-surfaced URL could otherwise reach `http://169.254.169.254/`
+(the cloud metadata endpoint on AWS/GCP/Azure), `localhost`, or an
+internal admin panel. `_is_safe_url` resolves the hostname and rejects
+anything that isn't a public IP address *before* connecting, and —
+because an httpx client configured to auto-follow redirects would let a
+malicious server 302 straight past that check — `_fetch_with_redirect_guard`
+re-runs the same validation on every redirect hop rather than trusting
+`follow_redirects=True`. This is an accepted, documented partial defense
+(it doesn't close a DNS-rebinding race between the check and the actual
+connect), the same kind of honestly-scoped caveat this project applies
+elsewhere (e.g. `thermal_monitor.py`'s sensor-access platform notes).
+Always advertised/available, like the Wolfram tool — no configuration is
+required for it to work at all.
+
+### Search backends: Tavily, SerpAPI, Serper, DuckDuckGo — `zane/tools/web_search.py`
+
+`web_search`'s "auto" backend selection is now a four-tier cascade:
+**Tavily** (if `TAVILY_API_KEY` is set — purpose-built for LLM
+tool-calling) > **SerpAPI** (if `SERPAPI_API_KEY` is set — real-time
+Google search results) > **Serper** (if `SERPER_API_KEY` is set — a
+different, cheaper real-time Google search results provider) >
+**DuckDuckGo** (always available, no key needed), added because a live
+key for one backend shouldn't mean total search failure if that backend
+has an outage — each tier falls through to the next on any exception
+rather than raising. Both SerpAPI and Serper reuse the project's existing
+`httpx` dependency (already pulled in for ElevenLabs/Wolfram) rather than
+adding dedicated SDKs, and each backend's HTTP client is created lazily
+on first use — a session with only a Tavily key configured never opens
+an unused HTTP client for a backend it will never call. As always,
+`SERPAPI_API_KEY`/`SERPER_API_KEY` are env-only, never hardcoded.
+
 ### Physical hardware: `zane/hardware/`
 
 The final integration layer, bridging the LLM/C++ core to real robotic
@@ -646,6 +693,25 @@ drop-oldest queue, prompt injection with the exact
 real `threading.Thread` (not just the async-native path), and
 `PixalSystemsCore`'s deterministic threshold detection across all three
 metric sources plus its honest-failure path on malformed input.
+
+`fetch_page` (`tests/test_fetch_page.py`) gets particular attention on the
+SSRF guard, since that's the part where a subtle bug is a real
+vulnerability rather than a wrong chat reply: it asserts
+`_resolves_to_public_address` correctly rejects loopback, private, and
+link-local IP literals (including `169.254.169.254`, the actual cloud
+metadata endpoint this guard exists to block) using real `socket.getaddrinfo`
+calls against IP literals — no DNS/network needed, since resolving an IP
+literal is a local parse, not a lookup — plus a monkeypatched-`gaierror`
+case for the DNS-failure path. It also proves the redirect guard actually
+matters: one test redirects to a disallowed address and confirms the
+fetch is refused, not silently followed. The HTTP/parsing layer
+(`httpx.MockTransport`) covers successful extraction, non-text content
+types, HTTP/network failures, empty-content pages, and truncation.
+`web_search`'s new backends (`tests/test_web_search.py`) test the full
+Tavily > SerpAPI > Serper > DuckDuckGo priority matrix and that a failing
+backend falls through to the next tier rather than the request failing
+outright, plus that each backend's httpx client is only ever opened
+lazily and closed cleanly.
 
 ## Extending to a new surface
 

@@ -40,6 +40,7 @@ from zane.memory.summarizer import ConversationSummarizer
 from zane.memory.vector_index import FaissVectorIndex
 from zane.personality import HumorSwitch, PersonaContext, build_system_prompt
 from zane.thermal_monitor import IceProtocolState, ThermalMonitor, maybe_handle_ice_protocol
+from zane.tools.fetch_page import PageFetcher
 from zane.tools.registry import ToolRegistry
 from zane.tools.web_search import WebSearchTool
 from zane.tools.wolfram_tool import WolframAlphaClient
@@ -144,6 +145,9 @@ class SharedBackend:
     # whether anything has ever flagged one.
     neural_bridge: NeuralBridge
     pixal: PixalSystemsCore
+    # Always present, like wolfram_client — fetch_page needs no API key or
+    # other configuration to work at all (see zane/tools/fetch_page.py).
+    page_fetcher: PageFetcher
 
     @classmethod
     def build(cls, settings_obj: Settings) -> "SharedBackend":
@@ -156,6 +160,12 @@ class SharedBackend:
             tavily_api_key=settings_obj.tavily_api_key,
             backend=settings_obj.search_backend,
             default_max_results=settings_obj.search_max_results,
+            serpapi_api_key=settings_obj.serpapi_api_key,
+            serper_api_key=settings_obj.serper_api_key,
+        )
+        page_fetcher = PageFetcher(
+            timeout_s=settings_obj.fetch_page_timeout_s,
+            max_text_chars=settings_obj.fetch_page_max_chars,
         )
         groq = AsyncGroqClient(
             api_key=settings_obj.groq_api_key,
@@ -255,7 +265,9 @@ class SharedBackend:
             critical_depth_threshold_m=BOUNTY_MAX_STRUCTURAL_DEPTH_M,
         )
 
-        tools = ToolRegistry(analytics, web_search, groq, peripheral_manager, wolfram_client)
+        tools = ToolRegistry(
+            analytics, web_search, groq, peripheral_manager, wolfram_client, page_fetcher
+        )
 
         tts: Optional[AsyncElevenLabsClient] = None
         if settings_obj.elevenlabs_api_key and settings_obj.elevenlabs_voice_id:
@@ -346,6 +358,7 @@ class SharedBackend:
             wolfram_client=wolfram_client,
             neural_bridge=neural_bridge,
             pixal=pixal,
+            page_fetcher=page_fetcher,
         )
 
     async def aclose(self) -> None:
@@ -353,6 +366,8 @@ class SharedBackend:
         self.analytics.shutdown()
         self.memory_store.close()
         await self.wolfram_client.close()
+        await self.web_search.close()
+        await self.page_fetcher.close()
         if self.tts is not None:
             await self.tts.close()
         if self.thermal_monitor is not None:

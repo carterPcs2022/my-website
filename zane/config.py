@@ -69,10 +69,22 @@ class Settings:
 
     # --- Web search ---
     tavily_api_key: Optional[str] = field(default_factory=lambda: os.getenv("TAVILY_API_KEY"))
+    # Never hardcoded — see zane/tools/web_search.py's module docstring for
+    # the auto-backend priority order (Tavily > SerpAPI > Serper > DuckDuckGo).
+    serpapi_api_key: Optional[str] = field(default_factory=lambda: os.getenv("SERPAPI_API_KEY"))
+    serper_api_key: Optional[str] = field(default_factory=lambda: os.getenv("SERPER_API_KEY"))
     search_max_results: int = field(default_factory=lambda: _env_int("SEARCH_MAX_RESULTS", 5))
     search_backend: str = field(
         default_factory=lambda: os.getenv("SEARCH_BACKEND", "auto")
-    )  # "auto" | "tavily" | "duckduckgo"
+    )  # "auto" | "tavily" | "serpapi" | "serper" | "duckduckgo"
+
+    # --- Page fetch tool (zane/tools/fetch_page.py) ---
+    fetch_page_timeout_s: float = field(
+        default_factory=lambda: _env_float("FETCH_PAGE_TIMEOUT_S", 10.0)
+    )
+    fetch_page_max_chars: int = field(
+        default_factory=lambda: _env_int("FETCH_PAGE_MAX_CHARS", 6000)
+    )
 
     # --- Personality ---
     humor_enabled_default: bool = field(

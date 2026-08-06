@@ -17,6 +17,13 @@ class _StubWebSearchTool(WebSearchTool):
         return f"stubbed results for {query!r}"
 
 
+class _StubPageFetcher:
+    """Avoids any real network call in tests."""
+
+    async def fetch(self, url):
+        return f"stubbed page content for {url!r}"
+
+
 class _StubGroqClient:
     """Avoids any real network call to Groq in tests."""
 
@@ -52,7 +59,7 @@ def registry():
     analytics = AnalyticsEngine(worker_threads=1, seed=99)
     web_search = _StubWebSearchTool()
     groq_client = _StubGroqClient()
-    reg = ToolRegistry(analytics, web_search, groq_client)
+    reg = ToolRegistry(analytics, web_search, groq_client, page_fetcher=_StubPageFetcher())
     yield reg
     analytics.shutdown()
 
@@ -99,6 +106,24 @@ async def test_dispatch_translate_text_propagates_groq_failure_as_tool_error():
         analytics.shutdown()
 
 
+async def test_dispatch_fetch_page(registry):
+    result = await registry.dispatch("fetch_page", json.dumps({"url": "https://example.com"}))
+    assert "example.com" in result
+
+
+async def test_dispatch_fetch_page_without_configured_page_fetcher_still_works():
+    # No page_fetcher passed at all -> dispatch falls back to the plain
+    # fetch_page() function with an ephemeral client. Using a URL that
+    # fails the SSRF check means this never makes a real network call.
+    analytics = AnalyticsEngine(worker_threads=1, seed=2)
+    reg = ToolRegistry(analytics, _StubWebSearchTool(), _StubGroqClient())
+    try:
+        result = await reg.dispatch("fetch_page", json.dumps({"url": "http://127.0.0.1/secret"}))
+        assert "FETCH_ERROR" in result
+    finally:
+        analytics.shutdown()
+
+
 async def test_dispatch_unknown_tool(registry):
     result = await registry.dispatch("nonexistent_tool", "{}")
     assert "TOOL_ERROR" in result
@@ -117,4 +142,5 @@ def test_schemas_include_all_tools(registry):
         "calculate_success_probability",
         "translate_text",
         "query_wolfram_alpha",
+        "fetch_page",
     }

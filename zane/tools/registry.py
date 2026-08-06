@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from zane.analytics_bridge import AnalyticsEngine, ProbabilityFactors
 from zane.groq_client import AsyncGroqClient
 from zane.hardware.peripheral_io import CRYO_DISCHARGE_TOOL_SCHEMA, PeripheralManager
+from zane.tools.fetch_page import FETCH_PAGE_TOOL_SCHEMA, PageFetcher, fetch_page
 from zane.tools.translate import TRANSLATE_TOOL_SCHEMA, translate_text
 from zane.tools.web_search import WEB_SEARCH_TOOL_SCHEMA, WebSearchTool
 from zane.tools.wolfram_tool import WOLFRAM_TOOL_SCHEMA, WolframAlphaClient, query_wolfram_alpha
@@ -74,6 +75,7 @@ class ToolRegistry:
         groq_client: AsyncGroqClient,
         peripheral_manager: Optional[PeripheralManager] = None,
         wolfram_client: Optional[WolframAlphaClient] = None,
+        page_fetcher: Optional[PageFetcher] = None,
     ) -> None:
         self._analytics = analytics
         self._web_search = web_search
@@ -86,6 +88,10 @@ class ToolRegistry:
         # advertised/usable even without WOLFRAM_APP_ID configured, since
         # it degrades to a local fallback rather than being unavailable.
         self._wolfram_client = wolfram_client
+        # Always present too — fetch_page works with no configuration at
+        # all (it's a plain HTTP fetch, not a third-party API), so there's
+        # no "unconfigured" state to gate it behind.
+        self._page_fetcher = page_fetcher
 
     def schemas(self) -> List[Dict[str, Any]]:
         schemas = [
@@ -93,6 +99,7 @@ class ToolRegistry:
             CALCULATE_PROBABILITY_TOOL_SCHEMA,
             TRANSLATE_TOOL_SCHEMA,
             WOLFRAM_TOOL_SCHEMA,
+            FETCH_PAGE_TOOL_SCHEMA,
         ]
         if self._peripheral_manager is not None:
             schemas.append(CRYO_DISCHARGE_TOOL_SCHEMA)
@@ -143,6 +150,11 @@ class ToolRegistry:
 
             if name == "query_wolfram_alpha":
                 return await query_wolfram_alpha(args["query"], self._wolfram_client)
+
+            if name == "fetch_page":
+                if self._page_fetcher is not None:
+                    return await self._page_fetcher.fetch(args["url"])
+                return await fetch_page(args["url"])  # ephemeral client, still works
 
             return f"TOOL_ERROR: unknown tool '{name}'"
         except Exception as exc:  # noqa: BLE001 - tool failures must not crash the chat loop
