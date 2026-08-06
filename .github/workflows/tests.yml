@@ -11,6 +11,7 @@ on:
   push:
     branches: [claude/zane-ninjago-hybrid-arch-741xhg]
   pull_request:
+  workflow_dispatch: {}
 
 permissions:
   contents: read
