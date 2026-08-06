@@ -124,6 +124,58 @@ class Settings:
         default_factory=lambda: _env_bool("ZANE_VOICE_DEFAULT", False)
     )
 
+    # --- Ice Protocol (thermal safety governor) ---
+    # Defaults OFF: psutil sensor access is unavailable in most container/
+    # cloud deployments (including this project's own Render/Docker
+    # target — see zane/thermal_monitor.py's module docstring), so this is
+    # meant to be opted into on bare-metal/local/robotics deployments.
+    ice_protocol_enabled: bool = field(
+        default_factory=lambda: _env_bool("ZANE_ICE_PROTOCOL_ENABLED", False)
+    )
+    ice_protocol_threshold_c: float = field(
+        default_factory=lambda: _env_float("ZANE_ICE_PROTOCOL_THRESHOLD_C", 75.0)
+    )
+    ice_protocol_hysteresis_c: float = field(
+        default_factory=lambda: _env_float("ZANE_ICE_PROTOCOL_HYSTERESIS_C", 5.0)
+    )
+    ice_protocol_poll_interval_s: float = field(
+        default_factory=lambda: _env_float("ZANE_ICE_PROTOCOL_POLL_INTERVAL_S", 5.0)
+    )
+
+    # --- Falcon Scout (system log/health daemon) ---
+    # Defaults ON: pure observability, no behavioral side effects on
+    # responses (unlike the Ice Protocol or the memory defragmenter below).
+    falcon_scout_enabled: bool = field(
+        default_factory=lambda: _env_bool("ZANE_FALCON_SCOUT_ENABLED", True)
+    )
+    falcon_scout_interval_s: float = field(
+        default_factory=lambda: _env_float("ZANE_FALCON_SCOUT_INTERVAL_S", 60.0)
+    )
+    falcon_scout_latency_threshold_ms: float = field(
+        default_factory=lambda: _env_float("ZANE_FALCON_SCOUT_LATENCY_THRESHOLD_MS", 1500.0)
+    )
+    falcon_scout_db_latency_threshold_ms: float = field(
+        default_factory=lambda: _env_float("ZANE_FALCON_SCOUT_DB_LATENCY_THRESHOLD_MS", 200.0)
+    )
+
+    # --- Memory Defragmenter (RAG conflict resolution) ---
+    # Defaults OFF: unlike Falcon Scout, this autonomously deletes memory
+    # rows (only ever on an explicit LLM-confirmed conflict — see
+    # zane/memory/memory_defragmenter.py — but still a real, conservative
+    # opt-in given the consequence of a mistake).
+    memory_defrag_enabled: bool = field(
+        default_factory=lambda: _env_bool("ZANE_MEMORY_DEFRAG_ENABLED", False)
+    )
+    memory_defrag_interval_s: float = field(
+        default_factory=lambda: _env_float("ZANE_MEMORY_DEFRAG_INTERVAL_S", 300.0)
+    )
+    memory_defrag_similarity_threshold: float = field(
+        default_factory=lambda: _env_float("ZANE_MEMORY_DEFRAG_SIMILARITY_THRESHOLD", 0.90)
+    )
+    memory_defrag_half_life_hours: float = field(
+        default_factory=lambda: _env_float("ZANE_MEMORY_DEFRAG_HALF_LIFE_HOURS", 168.0)
+    )
+
     def validate_for_groq(self) -> None:
         if not self.groq_api_key:
             raise RuntimeError(

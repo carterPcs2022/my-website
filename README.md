@@ -26,6 +26,7 @@ zane/                     High-level AI layer (Python)
     vector_index.py                FAISS semantic-search index
     summarizer.py                  LLM-driven summarization of aged-out history
     persistent.py                  PersistentMemory: ties the above together
+    memory_defragmenter.py         RAG conflict detection + resolution (opt-in)
   tools/
     web_search.py                Tavily/DuckDuckGo search tool
     translate.py                  LLM-backed translation tool
@@ -35,7 +36,9 @@ zane/                     High-level AI layer (Python)
     switch.py                     Per-session voice on/off toggle
     playback.py                    CLI local audio playback (best-effort)
   core.py                        ZaneMind: the orchestrator
-  control.py                     ZaneSensorInput / ZaneControlOutput seam (unimplemented)
+  control.py                     ZaneSensorInput / ZaneControlOutput seam + vehicle telemetry connector
+  thermal_monitor.py             Ice Protocol: real host thermal safety governor
+  falcon_worker.py                Falcon Scout: system health daemon -> self-recall memory
   interfaces/
     base.py                      ZaneInterface abstract base class
     cli.py                        CLI adapter
@@ -158,16 +161,78 @@ source) so it can be swapped independently per deployment.
   `/chat` schema). Toggle voice per session via `POST /command`
   (`{"command": "voice"}`), same as `humor`.
 
-### Future integration seam: `zane/control.py`
+### Vehicle telemetry / driving-sim connector: `zane/control.py`
 
-`ZaneSensorInput` and `ZaneControlOutput` in `zane/control.py` are typed,
-**unimplemented** abstract base classes — groundwork for a future
-driving-simulation or other actuated-system integration. Nothing in this
-codebase implements or wires them into `ZaneMind` yet; they exist purely
-so that future module has a clean seam to plug into without requiring any
-changes to the core orchestrator. `SensorReading` and `ControlCommand` are
-deliberately generic dataclasses (name/value/unit/timestamp + metadata)
-until a concrete driving-sim module defines its real fields.
+`ZaneSensorInput`/`ZaneControlOutput` started as unimplemented, generic
+scaffolding and are now `Generic` ABCs with a first concrete consumer: a
+Gymnasium/OpenAI-Gym-style telemetry bridge (`TelemetryLoop`,
+`VehicleTelemetryFrame`, `VehicleControlOutput`). Honest about what's real
+here: `ZaneAnalytics` has no pathfinding methods, and none were invented —
+the obstacle-avoidance vector math (`compute_avoidance_vector`) is
+deterministic, dependency-free pure Python (an artificial-potential-field,
+a standard robotics technique). What genuinely routes through the
+C++-bridged `zane_cpp` engine is the maneuver's confidence/risk score, via
+`AnalyticsEngine.calculate_success_probability` with a documented field
+mapping (`build_probability_factors`) — the same real computation Zane
+already uses for mission-style risk assessment. Any obstacle inside a
+configurable safety envelope, or too many consecutive tick failures,
+triggers `emergency_stop()` immediately, bypassing the normal decision
+math. `InMemoryVehicleSensor`/`InMemoryVehicleControlSink` are reference
+implementations a real sim integration replaces; nothing here is wired
+into `ZaneMind` — it's a standalone loop a driving-sim host would run.
+
+### Ice Protocol: `zane/thermal_monitor.py`
+
+A real host thermal safety governor — a background `threading.Thread`
+polls `psutil.sensors_temperatures()`, and crossing the configured
+threshold (default 75°C, with a hysteresis band to avoid flapping) sets
+`ice_protocol_active`, which `ZaneMind.respond()` checks *before* touching
+memory or Groq at all, short-circuiting to a local rules-based responder
+when active. **Read the caveat in the module docstring before enabling
+this**: `psutil` only reports real sensor data on Linux hosts with exposed
+`hwmon` sensors and never reports GPU temperature on its own — in
+virtually all containers and VMs, including this project's own
+Render/Docker deployment target, no sensors are visible to the guest at
+all, so the protocol simply never trips. This module never fabricates a
+reading to compensate; it's built for bare-metal/local/robotics
+deployments where `psutil` genuinely has sensor access, which is why
+`ZANE_ICE_PROTOCOL_ENABLED` defaults to `false`.
+
+### Falcon Scout: `zane/falcon_worker.py`
+
+A background async daemon (default every 60s) that profiles the running
+process — API request latency (via FastAPI middleware feeding
+`LatencyRecorder`), SQLite responsiveness (`SQLiteMessageStore.ping()`),
+and any `ERROR`+ log records captured since the last cycle
+(`InMemoryLogCapture`) — and, only when something is actually wrong,
+writes a technical summary directly into the shared RAG memory pipeline
+tagged `role="falcon_scout_telemetry"`. Deliberately does **not** call the
+LLM to write the summary (plain deterministic string formatting): Falcon
+Scout needs to keep working even if Groq itself is what's having
+problems. Because semantic retrieval already searches across every
+session rather than just the current one (see "Memory" above), these
+entries surface for organic recall — "how's your operational stability
+been?" — with no retrieval-path changes needed. Pure observability with
+no effect on response behavior, so `ZANE_FALCON_SCOUT_ENABLED` defaults
+to `true`.
+
+### Memory Defragmenter: `zane/memory/memory_defragmenter.py`
+
+Detects and resolves factual conflicts between stored memories — e.g. two
+contradictory records of "the vault code." Two-stage by design: cosine
+similarity is used only as a *candidate filter* (entries about the same
+subject — it measures topical relatedness, not truth-value agreement),
+and the actual contradiction judgment is delegated to an LLM call
+mirroring `zane/memory/summarizer.py`'s existing pattern. **Nothing is
+ever pruned without an explicit LLM-confirmed conflict** — an ambiguous,
+unparsable, or unavailable judgment always means "do nothing this cycle."
+When a conflict is confirmed, an exponential half-life recency weight
+(`_recency_weight`) picks which entry is authoritative, the older one is
+pruned from both SQLite and the FAISS index, and a new consolidated-truth
+entry is written (`role="memory_defrag_consolidated"`). Because this
+autonomously deletes data (however conservatively gated),
+`ZANE_MEMORY_DEFRAG_ENABLED` defaults to `false` — an intentionally higher
+bar to opt into than Falcon Scout's pure observability.
 
 ## Setup
 
@@ -241,13 +306,21 @@ Tests exercise the personality prompt builder, the analytics engine (using
 whichever backend — native or pure-Python fallback — is available in the
 current environment), rolling memory trimming, tool dispatch, the
 persistent memory subsystem (SQLite write durability, FAISS retrieval
-ranking, summarization triggering, and pruning), and voice synthesis
-(success path, retry-then-succeed, non-retryable and retry-exhausted
-failure, and the toggle-on/off fallback behavior — all against an injected
-fake SDK client, no real ElevenLabs calls). The real sentence-transformers
-model requires downloading weights on first use; `tests/test_embeddings.py`
-skips its real-model assertions (rather than failing) in offline
-environments while still testing failure handling.
+ranking, summarization triggering, and pruning), voice synthesis (success
+path, retry-then-succeed, non-retryable and retry-exhausted failure, and
+the toggle-on/off fallback behavior — all against an injected fake SDK
+client, no real ElevenLabs calls), the vehicle telemetry connector
+(parsing/validation, avoidance-vector math, emergency-stop triggering on
+close obstacles and on repeated tick failures), the Ice Protocol
+(threshold/hysteresis transitions via a monkeypatched sensor reader, the
+low-power responder), Falcon Scout (latency/DB/exception detection against
+fake stores, graceful degradation on embedding failure), and the memory
+defragmenter (confirmed-conflict pruning, and — just as importantly — that
+a no-conflict, unparsable, or Groq-unavailable judgment never deletes
+anything). The real sentence-transformers model requires downloading
+weights on first use; `tests/test_embeddings.py` skips its real-model
+assertions (rather than failing) in offline environments while still
+testing failure handling.
 
 ## Extending to a new surface
 

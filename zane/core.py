@@ -7,6 +7,7 @@ to — see zane/interfaces/ for the thin adapters built on top of it.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -15,13 +16,16 @@ from typing import List, Optional
 
 from zane.analytics_bridge import AnalyticsEngine, DataStreamFrame
 from zane.config import Settings, settings as default_settings
+from zane.falcon_worker import FalconWorker, FalconWorkerConfig, InMemoryLogCapture, LatencyRecorder
 from zane.groq_client import AsyncGroqClient, GroqUnavailableError
 from zane.memory.embeddings import EmbeddingBackend
+from zane.memory.memory_defragmenter import MemoryDefragmenter
 from zane.memory.persistent import PersistentMemory, PersistentMemoryConfig
 from zane.memory.store import SQLiteMessageStore
 from zane.memory.summarizer import ConversationSummarizer
 from zane.memory.vector_index import FaissVectorIndex
 from zane.personality import HumorSwitch, PersonaContext, build_system_prompt
+from zane.thermal_monitor import IceProtocolState, ThermalMonitor, maybe_handle_ice_protocol
 from zane.tools.registry import ToolRegistry
 from zane.tools.web_search import WebSearchTool
 from zane.voice.switch import VoiceSwitch
@@ -74,6 +78,20 @@ class SharedBackend:
     # the `elevenlabs` package isn't installed — voice then silently no-ops
     # even if a session's VoiceSwitch is on (see synthesize_with_fallback).
     tts: Optional[AsyncElevenLabsClient]
+    # Ice Protocol: state is always present (cheap, just a flag+lock) so
+    # ZaneMind.respond() can check it unconditionally; the background
+    # thread that could ever set it active only runs if enabled.
+    ice_protocol_state: IceProtocolState
+    ice_protocol_threshold_c: float
+    thermal_monitor: Optional[ThermalMonitor]
+    # Falcon Scout: latency_recorder is always present so API middleware
+    # always has somewhere to record into, even if the worker's disabled.
+    latency_recorder: LatencyRecorder
+    log_capture: InMemoryLogCapture
+    falcon_worker: Optional[FalconWorker]
+    falcon_task: Optional["asyncio.Task"]
+    memory_defragmenter: Optional[MemoryDefragmenter]
+    memory_defrag_task: Optional["asyncio.Task"]
 
     @classmethod
     def build(cls, settings_obj: Settings) -> "SharedBackend":
@@ -117,6 +135,45 @@ class SharedBackend:
                 )
                 tts = None
 
+        ice_protocol_state = IceProtocolState()
+        thermal_monitor: Optional[ThermalMonitor] = None
+        if settings_obj.ice_protocol_enabled:
+            thermal_monitor = ThermalMonitor(
+                ice_protocol_state,
+                threshold_c=settings_obj.ice_protocol_threshold_c,
+                hysteresis_c=settings_obj.ice_protocol_hysteresis_c,
+                poll_interval_s=settings_obj.ice_protocol_poll_interval_s,
+            )
+            thermal_monitor.start()
+
+        latency_recorder = LatencyRecorder()
+        log_capture = InMemoryLogCapture()
+        log_capture.install("zane")
+
+        falcon_worker: Optional[FalconWorker] = None
+        falcon_task: Optional[asyncio.Task] = None
+        if settings_obj.falcon_scout_enabled:
+            falcon_worker = FalconWorker(
+                memory_store, embeddings, vector_index, latency_recorder, log_capture,
+                FalconWorkerConfig(
+                    interval_s=settings_obj.falcon_scout_interval_s,
+                    latency_threshold_ms=settings_obj.falcon_scout_latency_threshold_ms,
+                    db_latency_threshold_ms=settings_obj.falcon_scout_db_latency_threshold_ms,
+                ),
+            )
+            falcon_task = asyncio.create_task(falcon_worker.run_forever())
+
+        memory_defragmenter: Optional[MemoryDefragmenter] = None
+        memory_defrag_task: Optional[asyncio.Task] = None
+        if settings_obj.memory_defrag_enabled:
+            memory_defragmenter = MemoryDefragmenter(
+                memory_store, embeddings, vector_index, groq,
+                similarity_threshold=settings_obj.memory_defrag_similarity_threshold,
+                half_life_s=settings_obj.memory_defrag_half_life_hours * 3600.0,
+                interval_s=settings_obj.memory_defrag_interval_s,
+            )
+            memory_defrag_task = asyncio.create_task(memory_defragmenter.run_forever())
+
         return cls(
             analytics=analytics,
             web_search=web_search,
@@ -127,6 +184,15 @@ class SharedBackend:
             vector_index=vector_index,
             summarizer=summarizer,
             tts=tts,
+            ice_protocol_state=ice_protocol_state,
+            ice_protocol_threshold_c=settings_obj.ice_protocol_threshold_c,
+            thermal_monitor=thermal_monitor,
+            latency_recorder=latency_recorder,
+            log_capture=log_capture,
+            falcon_worker=falcon_worker,
+            falcon_task=falcon_task,
+            memory_defragmenter=memory_defragmenter,
+            memory_defrag_task=memory_defrag_task,
         )
 
     async def aclose(self) -> None:
@@ -135,6 +201,20 @@ class SharedBackend:
         self.memory_store.close()
         if self.tts is not None:
             await self.tts.close()
+        if self.thermal_monitor is not None:
+            self.thermal_monitor.stop()
+        for worker, task in (
+            (self.falcon_worker, self.falcon_task),
+            (self.memory_defragmenter, self.memory_defrag_task),
+        ):
+            if worker is not None:
+                worker.stop()
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 
 class ZaneMind:
@@ -210,6 +290,20 @@ class ZaneMind:
         """Runs one full conversational turn, including any number of tool
         calls the model requests, and returns Zane's synthesized reply."""
         start = time.monotonic()
+
+        # Ice Protocol interception: if the host is thermally throttled,
+        # completely bypass Groq and the RAG memory stack (including this
+        # turn's own memory write) for a local, rules-based reply instead.
+        ice_protocol_text = await maybe_handle_ice_protocol(
+            user_input,
+            self._shared.ice_protocol_state,
+            self.analytics,
+            self._shared.ice_protocol_threshold_c,
+        )
+        if ice_protocol_text is not None:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            return TurnResult(text=ice_protocol_text, tool_calls_made=[], elapsed_ms=elapsed_ms)
+
         tool_calls_made: List[str] = []
 
         await self.memory.add_user_message(user_input)

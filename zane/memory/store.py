@@ -228,6 +228,35 @@ class SQLiteMessageStore:
         summaries = self.get_summaries(session_id)
         return summaries[-1] if summaries else None
 
+    def get_recently_embedded_messages(self, limit: int) -> List[MessageRow]:
+        """The most recently written messages that have a non-null
+        embedding, newest first, across every session. Used by
+        `zane.memory.memory_defragmenter` to sweep for conflicts without
+        needing a per-write hook into `PersistentMemory`."""
+
+        def _do():
+            rows = self._conn.execute(
+                "SELECT * FROM messages WHERE embedding_id IS NOT NULL "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [self._row_to_message(r) for r in rows]
+
+        return self._execute_with_retry(_do)
+
+    def ping(self) -> float:
+        """Times a trivial round-trip query against the database and
+        returns the elapsed time in milliseconds. Used by
+        `zane.falcon_worker` as a real (not simulated) DB responsiveness
+        probe."""
+        start = time.monotonic()
+
+        def _do():
+            self._conn.execute("SELECT 1").fetchone()
+
+        self._execute_with_retry(_do)
+        return (time.monotonic() - start) * 1000
+
     @staticmethod
     def _row_to_message(row: sqlite3.Row) -> MessageRow:
         return MessageRow(

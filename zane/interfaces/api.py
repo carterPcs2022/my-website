@@ -27,10 +27,11 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from zane.config import settings
@@ -128,6 +129,25 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def record_request_latency(request: Request, call_next):
+    """Feeds Falcon Scout's `LatencyRecorder` (see zane/falcon_worker.py)
+    real per-request timings; a no-op if the backend hasn't finished
+    starting up yet or Falcon Scout is disabled (recorder always exists,
+    just goes unread in that case)."""
+    start = time.monotonic()
+    response = await call_next(request)
+    elapsed_ms = (time.monotonic() - start) * 1000
+    if sessions._backend is not None:
+        sessions._backend.latency_recorder.record(
+            path=request.url.path,
+            method=request.method,
+            status_code=response.status_code,
+            latency_ms=elapsed_ms,
+        )
+    return response
 
 
 @app.post("/chat", response_model=ChatResponse)
