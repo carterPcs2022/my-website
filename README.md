@@ -39,6 +39,12 @@ zane/                     High-level AI layer (Python)
   control.py                     ZaneSensorInput / ZaneControlOutput seam + vehicle telemetry connector
   thermal_monitor.py             Ice Protocol: real host thermal safety governor
   falcon_worker.py                Falcon Scout: system health daemon -> self-recall memory
+  hardware/                      Physical robot integration (opt-in, see "Physical hardware")
+    hal.py                        HardwareAbstractionLayer: MockHAL (default) / GPIOHAL (real, untested)
+    vision_processor.py            Camera + face detection -> "[SENSORY_HUD_INPUT]" context block
+    peripheral_io.py               Cryo-discharge solenoid (LLM tool) + NeoPixel status ring
+    sensory_localization.py        Acoustic DoA -> neck-servo tracking
+    hardware_state_controller.py   GPIO/socket-triggered Humor Switch override
   interfaces/
     base.py                      ZaneInterface abstract base class
     cli.py                        CLI adapter
@@ -47,6 +53,7 @@ zane/                     High-level AI layer (Python)
 
 Dockerfile / render.yaml     Container deployment (see "Deploying to Render")
 requirements-core.txt        Light deps; requirements-memory.txt adds the heavy RAG stack
+requirements-hardware.txt    Raspberry Pi only — never installed by Docker/CI, see "Physical hardware"
 ```
 
 ### Why C++ + Python?
@@ -234,6 +241,77 @@ autonomously deletes data (however conservatively gated),
 `ZANE_MEMORY_DEFRAG_ENABLED` defaults to `false` — an intentionally higher
 bar to opt into than Falcon Scout's pure observability.
 
+### Physical hardware: `zane/hardware/`
+
+The final integration layer, bridging the LLM/C++ core to real robotic
+I/O — off by default (`ZANE_HARDWARE_ENABLED=false`), since none of this
+hardware exists in the Render/Docker deployment. Every module takes a
+`HardwareAbstractionLayer` (`zane/hardware/hal.py`) via dependency
+injection: `MockHAL` (zero dependencies, logs every operation in Zane's
+terminal voice) is what actually runs by default and in every test in
+this repo; `GPIOHAL` (real `gpiozero` + NeoPixel hardware, opted into
+separately via `ZANE_HARDWARE_USE_REAL_GPIO`) is **untested** — there is
+no physical GPIO chip anywhere this project runs, sandbox or Render
+alike, so treat it as unverified until run on an actual Raspberry Pi.
+
+**A deliberate deviation from a literal reading of the spec, worth being
+explicit about**: `engage_cryo_discharge` drives a solenoid on a real 12V
+CO2 valve — a genuine pressurized-gas actuator — and is reachable from the
+LLM's own tool-calling loop. An LLM's judgment is not trusted as the sole
+safety boundary for that. `PeripheralManager`
+(`zane/hardware/peripheral_io.py`) starts **disarmed**
+(`ZANE_HARDWARE_CRYO_ARMED=false`) regardless of `ZANE_HARDWARE_ENABLED` —
+nothing the model says can fire the solenoid until something outside its
+control arms it; every requested duration is clamped to a hard maximum
+regardless of what's asked for; a cooldown window rejects rapid re-fire;
+and the relay is switched off in a `finally` block so a mid-discharge
+exception or cancellation can never leave it energized.
+
+- **Vision** (`vision_processor.py`) — a real (not stubbed-out)
+  `cv2.CascadeClassifier` Haar-cascade face detector, using the classifier
+  XML bundled inside `opencv-python-headless` itself
+  (`cv2.data.haarcascades`) — no model download required. `distance_meters`
+  is a genuine monocular pinhole-camera estimate (known face width x focal
+  length / apparent pixel width), honestly caveated as approximate, not
+  LIDAR-grade. Formats a `"[SENSORY_HUD_INPUT]: Target array updated..."`
+  block injected into the system prompt as its own distinct block (see
+  `PersonaContext.sensory_hud` in `personality.py`) — **deliberately
+  ephemeral**: never written to the persistent RAG store, so this does not
+  create a standing log of who has appeared in front of the camera.
+- **Peripherals** (`peripheral_io.py`) — the cryo solenoid (see safety note
+  above) plus a WS2812B NeoPixel ring reflecting Zane's operational mode
+  (`IDLE`/`THINKING`/`SPEAKING`/`ERROR`) via a real async animation loop
+  (pulsing ice-blue while thinking, solid blue while speaking, flashing
+  red on a Groq failure). This is a *system*-driven state transition
+  `ZaneMind.respond()` triggers directly, not an LLM tool — the model
+  doesn't decide when it's "thinking."
+- **Acoustic localization** (`sensory_localization.py`) — consumes
+  Direction-of-Arrival frames and smooths them with a circular-mean-aware
+  exponential moving average (unit-vector averaging + `atan2`, not a naive
+  linear EMA, which has a real, well-known jump artifact right at the
+  0°/360° wrap boundary — verified this matters: `smooth(359°, 1°)`
+  naively drifts toward 180° instead of ~0°). Drives
+  `HeadTrackingState.target_neck_angle` — a small, purpose-built holder,
+  **not** `control.py`'s vehicle-domain `ZaneControlOutput`/
+  `VehicleControlOutput` (an earlier spec named it that, but a "throttle"
+  field has no meaning for a neck servo — bolting the two together would
+  conflate unrelated actuator domains).
+- **Hardware state controller** (`hardware_state_controller.py`) — connects
+  the physical Humor Switch to `personality.HumorSwitch`'s new
+  `lock()`/`unlock()`, via two independent, real, testable trigger paths: a
+  GPIO interrupt callback (`HardwareAbstractionLayer.watch_digital_pin`,
+  fireable on `MockHAL` via `simulate_pin_change` — exactly what the tests
+  do) and a local asyncio socket server accepting
+  `HUMOR_SWITCH:OFF`/`HUMOR_SWITCH:ON`/`OVERRIDE:CLEAR` commands (the more
+  relevant path given this project's actual deployment has no GPIO pins at
+  all). Also subscribes to Falcon Scout's new `SystemFaultState` — a
+  critical fault (DB entirely down, or enough caught exceptions in one
+  cycle) engages the same override. Both triggers must clear before the
+  override lifts. One physical robot body has one humor state, not one
+  per chat session: when hardware is enabled, every `ZaneMind` session on
+  the process shares one `HumorSwitch` instance instead of each getting
+  its own private one.
+
 ## Setup
 
 ```bash
@@ -317,10 +395,23 @@ low-power responder), Falcon Scout (latency/DB/exception detection against
 fake stores, graceful degradation on embedding failure), and the memory
 defragmenter (confirmed-conflict pruning, and — just as importantly — that
 a no-conflict, unparsable, or Groq-unavailable judgment never deletes
-anything). The real sentence-transformers model requires downloading
-weights on first use; `tests/test_embeddings.py` skips its real-model
-assertions (rather than failing) in offline environments while still
-testing failure handling.
+anything), and the physical hardware layer — all against `MockHAL`, the
+only HAL implementation that's actually exercised anywhere in this repo:
+distance estimation and HUD formatting, cryo-discharge arming/clamping/
+cooldown/relay-shutoff, the NeoPixel animation loop, circular DoA
+smoothing (specifically the 359°/1° wraparound case a naive linear EMA
+gets wrong), and the hardware state controller's GPIO-callback and
+real-socket-connection override paths, including that both triggers must
+clear before the override lifts. The real cv2 Haar-cascade detection path
+and the opencv-python-headless version pin were validated manually
+against the actual library while building `vision_processor.py` (see its
+module docstring) rather than shipped as an automated test, since `cv2`
+is Raspberry-Pi/hardware-only and not a project dependency. `GPIOHAL`
+itself is untested — there is no physical GPIO chip anywhere this project
+runs. The real sentence-transformers model requires downloading weights
+on first use; `tests/test_embeddings.py` skips its real-model assertions
+(rather than failing) in offline environments while still testing failure
+handling.
 
 ## Extending to a new surface
 

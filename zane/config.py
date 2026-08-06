@@ -45,6 +45,16 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_optional_int(name: str) -> Optional[int]:
+    val = os.getenv(name)
+    if val is None or val == "":
+        return None
+    try:
+        return int(val)
+    except ValueError:
+        return None
+
+
 @dataclass
 class Settings:
     # --- Groq ---
@@ -174,6 +184,65 @@ class Settings:
     )
     memory_defrag_half_life_hours: float = field(
         default_factory=lambda: _env_float("ZANE_MEMORY_DEFRAG_HALF_LIFE_HOURS", 168.0)
+    )
+
+    # --- Physical hardware integration (zane/hardware/) ---
+    # Master switch. Defaults OFF: none of this hardware exists in this
+    # project's actual Render/Docker deployment, and even when enabled
+    # every sub-module still runs against MockHAL (a terminal log) unless
+    # ZANE_HARDWARE_USE_REAL_GPIO is also set — see zane/hardware/hal.py.
+    hardware_enabled: bool = field(
+        default_factory=lambda: _env_bool("ZANE_HARDWARE_ENABLED", False)
+    )
+    hardware_use_real_gpio: bool = field(
+        default_factory=lambda: _env_bool("ZANE_HARDWARE_USE_REAL_GPIO", False)
+    )
+
+    # Vision
+    hardware_camera_index: int = field(
+        default_factory=lambda: _env_int("ZANE_HARDWARE_CAMERA_INDEX", 0)
+    )
+    hardware_vision_interval_s: float = field(
+        default_factory=lambda: _env_float("ZANE_HARDWARE_VISION_INTERVAL_S", 1.0)
+    )
+
+    # Peripherals (cryo solenoid + NeoPixel ring)
+    hardware_cryo_relay_pin: int = field(
+        default_factory=lambda: _env_int("ZANE_HARDWARE_CRYO_RELAY_PIN", 17)
+    )
+    # Separate from hardware_enabled: the solenoid stays disarmed (tool
+    # calls refused) even with hardware fully enabled, unless explicitly
+    # armed — see the safety note in zane/hardware/peripheral_io.py.
+    hardware_cryo_armed: bool = field(
+        default_factory=lambda: _env_bool("ZANE_HARDWARE_CRYO_ARMED", False)
+    )
+    hardware_cryo_max_discharge_s: float = field(
+        default_factory=lambda: _env_float("ZANE_HARDWARE_CRYO_MAX_DISCHARGE_S", 2.0)
+    )
+    hardware_cryo_cooldown_s: float = field(
+        default_factory=lambda: _env_float("ZANE_HARDWARE_CRYO_COOLDOWN_S", 5.0)
+    )
+    hardware_neopixel_pin: int = field(
+        default_factory=lambda: _env_int("ZANE_HARDWARE_NEOPIXEL_PIN", 18)
+    )
+    hardware_neopixel_count: int = field(
+        default_factory=lambda: _env_int("ZANE_HARDWARE_NEOPIXEL_COUNT", 16)
+    )
+
+    # Acoustic localization (neck-tracking servo)
+    hardware_neck_servo_pin: int = field(
+        default_factory=lambda: _env_int("ZANE_HARDWARE_NECK_SERVO_PIN", 22)
+    )
+    hardware_doa_smoothing_alpha: float = field(
+        default_factory=lambda: _env_float("ZANE_HARDWARE_DOA_SMOOTHING_ALPHA", 0.3)
+    )
+
+    # Hardware state controller (Humor Switch override)
+    hardware_humor_gpio_pin: Optional[int] = field(
+        default_factory=lambda: _env_optional_int("ZANE_HARDWARE_HUMOR_GPIO_PIN")
+    )
+    hardware_override_socket_port: Optional[int] = field(
+        default_factory=lambda: _env_optional_int("ZANE_HARDWARE_OVERRIDE_SOCKET_PORT")
     )
 
     def validate_for_groq(self) -> None:

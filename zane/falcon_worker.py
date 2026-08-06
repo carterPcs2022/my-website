@@ -23,7 +23,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, List, Optional
+from typing import Deque, List, Optional, Tuple
 
 from zane.memory.embeddings import EmbeddingBackend
 from zane.memory.store import SQLiteMessageStore
@@ -99,11 +99,43 @@ class InMemoryLogCapture(logging.Handler):
 
 
 @dataclass
+class SystemFaultState:
+    """Thread-safe holder for "is something critically wrong right now,"
+    set by `FalconWorker` and read by
+    `zane.hardware.hardware_state_controller.HardwareStateController`,
+    which engages its priority override (discarding the humor protocol)
+    while a critical fault is active. Same snapshot/update pattern as
+    `zane.thermal_monitor.IceProtocolState`."""
+
+    active: bool = False
+    reason: str = ""
+    since_ts: float = 0.0
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def snapshot(self) -> "SystemFaultState":
+        with self._lock:
+            return SystemFaultState(active=self.active, reason=self.reason, since_ts=self.since_ts)
+
+    def set(self, active: bool, reason: str = "") -> None:
+        with self._lock:
+            if active and not self.active:
+                self.since_ts = time.time()
+            self.active = active
+            self.reason = reason if active else ""
+
+
+@dataclass
 class FalconWorkerConfig:
     interval_s: float = 60.0
     latency_threshold_ms: float = 1500.0
     db_latency_threshold_ms: float = 200.0
     session_id: str = FALCON_SCOUT_SESSION_ID
+    # A cycle reporting at least this many caught exceptions, or a DB probe
+    # that fails entirely (not just slow), is classified "critical" and
+    # sets SystemFaultState.active — see FalconWorker._classify_severity.
+    critical_exception_count: int = 5
 
 
 class FalconWorker:
@@ -115,6 +147,7 @@ class FalconWorker:
         latency_recorder: LatencyRecorder,
         log_capture: InMemoryLogCapture,
         config: Optional[FalconWorkerConfig] = None,
+        fault_state: Optional[SystemFaultState] = None,
     ) -> None:
         self._memory_store = memory_store
         self._embeddings = embeddings
@@ -122,6 +155,11 @@ class FalconWorker:
         self._latency_recorder = latency_recorder
         self._log_capture = log_capture
         self.config = config or FalconWorkerConfig()
+        # Optional: when provided, critical cycles update this so
+        # zane.hardware.hardware_state_controller can react in real time,
+        # independent of (and faster than) anything reading it back out of
+        # the RAG memory store.
+        self._fault_state = fault_state
         self._running = False
 
     def _summarize_latency(self, samples: List[RequestLatencySample]) -> Optional[str]:
@@ -138,22 +176,24 @@ class FalconWorker:
             f"status {worst.status_code})."
         )
 
-    def _probe_db(self) -> Optional[str]:
+    def _probe_db(self) -> Tuple[Optional[str], bool]:
+        """Returns (issue message or None, is_critical). A DB that fails
+        entirely is critical; one that's merely slow is a lesser finding."""
         try:
             elapsed_ms = self._memory_store.ping()
         except Exception as exc:  # noqa: BLE001
-            return f"SQLite ping failed entirely: {exc}"
+            return f"SQLite ping failed entirely: {exc}", True
         if elapsed_ms >= self.config.db_latency_threshold_ms:
             return (
                 f"SQLite ping took {elapsed_ms:.1f}ms, exceeding the "
                 f"{self.config.db_latency_threshold_ms:.0f}ms threshold."
-            )
-        return None
+            ), False
+        return None, False
 
     async def _run_cycle(self) -> None:
         latency_samples = self._latency_recorder.snapshot_and_clear()
         latency_issue = self._summarize_latency(latency_samples)
-        db_issue = await asyncio.to_thread(self._probe_db)
+        db_issue, db_critical = await asyncio.to_thread(self._probe_db)
         caught_exceptions = self._log_capture.drain()
 
         findings: List[str] = []
@@ -167,14 +207,24 @@ class FalconWorker:
                 f"Most recent: {caught_exceptions[-1]}"
             )
 
+        is_critical = db_critical or len(caught_exceptions) >= self.config.critical_exception_count
+
         if not findings:
             logger.debug("Falcon Scout cycle: nothing to report (%d requests observed).", len(latency_samples))
+            if self._fault_state is not None:
+                self._fault_state.set(False)
             return
 
         summary = (
             f"[FALCON SCOUT REPORT @ {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}] "
             + " | ".join(findings)
         )
+
+        if self._fault_state is not None:
+            self._fault_state.set(is_critical, reason=summary if is_critical else "")
+            if is_critical:
+                logger.critical("[FALCON SCOUT] Critical system fault flagged: %s", summary)
+
         await self._write_telemetry(summary)
 
     async def _write_telemetry(self, summary: str) -> None:

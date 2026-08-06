@@ -9,6 +9,7 @@ from zane.falcon_worker import (
     FalconWorkerConfig,
     InMemoryLogCapture,
     LatencyRecorder,
+    SystemFaultState,
 )
 from zane.memory.store import SQLiteMessageStore
 
@@ -135,3 +136,72 @@ async def test_run_cycle_reports_db_probe_failure(store, monkeypatch):
     rows = store.get_all_messages_ordered("zane-system-telemetry")
     assert len(rows) == 1
     assert "DATABASE" in rows[0].content
+
+
+def test_system_fault_state_default_inactive():
+    state = SystemFaultState()
+    assert state.active is False
+    assert state.reason == ""
+
+
+def test_system_fault_state_set_active_records_reason_and_timestamp():
+    state = SystemFaultState()
+    state.set(True, reason="db down")
+    snap = state.snapshot()
+    assert snap.active is True
+    assert snap.reason == "db down"
+    assert snap.since_ts > 0
+
+
+def test_system_fault_state_clearing_resets_reason():
+    state = SystemFaultState()
+    state.set(True, reason="db down")
+    state.set(False)
+    snap = state.snapshot()
+    assert snap.active is False
+    assert snap.reason == ""
+
+
+async def test_run_cycle_marks_fault_state_critical_on_db_failure(store, monkeypatch):
+    def _broken_ping():
+        raise RuntimeError("db is on fire")
+
+    monkeypatch.setattr(store, "ping", _broken_ping)
+    fault_state = SystemFaultState()
+    worker = FalconWorker(
+        store, _FakeEmbeddings(), _FakeVectorIndex(), LatencyRecorder(), InMemoryLogCapture(),
+        fault_state=fault_state,
+    )
+    await worker._run_cycle()
+
+    assert fault_state.snapshot().active is True
+
+
+async def test_run_cycle_marks_fault_state_critical_on_many_exceptions(store):
+    log_capture = InMemoryLogCapture()
+    test_logger = logging.getLogger("zane.test.falcon_critical")
+    test_logger.addHandler(log_capture)
+    for i in range(6):
+        test_logger.error("failure %d", i)
+
+    fault_state = SystemFaultState()
+    worker = FalconWorker(
+        store, _FakeEmbeddings(), _FakeVectorIndex(), LatencyRecorder(), log_capture,
+        FalconWorkerConfig(critical_exception_count=5),
+        fault_state=fault_state,
+    )
+    await worker._run_cycle()
+
+    assert fault_state.snapshot().active is True
+
+
+async def test_run_cycle_clears_fault_state_when_all_clear(store):
+    fault_state = SystemFaultState()
+    fault_state.set(True, reason="stale from a previous cycle")
+    worker = FalconWorker(
+        store, _FakeEmbeddings(), _FakeVectorIndex(), LatencyRecorder(), InMemoryLogCapture(),
+        fault_state=fault_state,
+    )
+    await worker._run_cycle()
+
+    assert fault_state.snapshot().active is False

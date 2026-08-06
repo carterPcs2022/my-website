@@ -16,8 +16,19 @@ from typing import List, Optional
 
 from zane.analytics_bridge import AnalyticsEngine, DataStreamFrame
 from zane.config import Settings, settings as default_settings
-from zane.falcon_worker import FalconWorker, FalconWorkerConfig, InMemoryLogCapture, LatencyRecorder
+from zane.falcon_worker import (
+    FalconWorker,
+    FalconWorkerConfig,
+    InMemoryLogCapture,
+    LatencyRecorder,
+    SystemFaultState,
+)
 from zane.groq_client import AsyncGroqClient, GroqUnavailableError
+from zane.hardware.hal import HardwareAbstractionLayer, get_hal
+from zane.hardware.hardware_state_controller import HardwareStateController
+from zane.hardware.peripheral_io import PeripheralManager
+from zane.hardware.sensory_localization import AcousticLocalizer, HeadTrackingState
+from zane.hardware.vision_processor import VisionPipeline
 from zane.memory.embeddings import EmbeddingBackend
 from zane.memory.memory_defragmenter import MemoryDefragmenter
 from zane.memory.persistent import PersistentMemory, PersistentMemoryConfig
@@ -92,6 +103,22 @@ class SharedBackend:
     falcon_task: Optional["asyncio.Task"]
     memory_defragmenter: Optional[MemoryDefragmenter]
     memory_defrag_task: Optional["asyncio.Task"]
+    # Physical hardware layer (zane/hardware/). `hal` is always present
+    # (MockHAL if hardware isn't enabled/available — see get_hal); the
+    # rest are None unless ZANE_HARDWARE_ENABLED.
+    hal: HardwareAbstractionLayer
+    system_fault_state: SystemFaultState
+    peripheral_manager: Optional[PeripheralManager]
+    vision_pipeline: Optional[VisionPipeline]
+    vision_task: Optional["asyncio.Task"]
+    head_tracking_state: Optional[HeadTrackingState]
+    acoustic_localizer: Optional[AcousticLocalizer]
+    localizer_task: Optional["asyncio.Task"]
+    hardware_state_controller: Optional[HardwareStateController]
+    # One physical robot body has one humor state, not one per chat
+    # session. Only set when hardware is enabled — see ZaneMind.__init__,
+    # which falls back to a private per-session HumorSwitch otherwise.
+    shared_humor_switch: Optional[HumorSwitch]
 
     @classmethod
     def build(cls, settings_obj: Settings) -> "SharedBackend":
@@ -113,7 +140,63 @@ class SharedBackend:
             timeout_s=settings_obj.groq_timeout_s,
             max_retries=settings_obj.groq_max_retries,
         )
-        tools = ToolRegistry(analytics, web_search, groq)
+
+        hal = get_hal(
+            prefer_physical=settings_obj.hardware_enabled and settings_obj.hardware_use_real_gpio
+        )
+        system_fault_state = SystemFaultState()
+
+        peripheral_manager: Optional[PeripheralManager] = None
+        vision_pipeline: Optional[VisionPipeline] = None
+        vision_task: Optional[asyncio.Task] = None
+        head_tracking_state: Optional[HeadTrackingState] = None
+        acoustic_localizer: Optional[AcousticLocalizer] = None
+        localizer_task: Optional[asyncio.Task] = None
+        hardware_state_controller: Optional[HardwareStateController] = None
+        # One physical robot body has one humor state, not one per chat
+        # session — see ZaneMind.__init__, which uses this shared instance
+        # instead of a private per-session HumorSwitch whenever hardware is
+        # enabled. None (and unused) otherwise.
+        shared_humor_switch: Optional[HumorSwitch] = None
+
+        if settings_obj.hardware_enabled:
+            peripheral_manager = PeripheralManager(
+                hal,
+                cryo_relay_pin=settings_obj.hardware_cryo_relay_pin,
+                neopixel_pin=settings_obj.hardware_neopixel_pin,
+                neopixel_count=settings_obj.hardware_neopixel_count,
+                armed=settings_obj.hardware_cryo_armed,
+                max_discharge_s=settings_obj.hardware_cryo_max_discharge_s,
+                min_cooldown_s=settings_obj.hardware_cryo_cooldown_s,
+            )
+
+            vision_pipeline = VisionPipeline(
+                hal,
+                camera_index=settings_obj.hardware_camera_index,
+                detection_interval_s=settings_obj.hardware_vision_interval_s,
+            )
+            vision_task = asyncio.create_task(vision_pipeline.run_forever())
+
+            head_tracking_state = HeadTrackingState()
+            acoustic_localizer = AcousticLocalizer(
+                hal,
+                head_tracking_state,
+                servo_pin=settings_obj.hardware_neck_servo_pin,
+                smoothing_alpha=settings_obj.hardware_doa_smoothing_alpha,
+            )
+            localizer_task = asyncio.create_task(acoustic_localizer.run_forever())
+
+            shared_humor_switch = HumorSwitch(settings_obj.humor_enabled_default)
+            hardware_state_controller = HardwareStateController(
+                hal,
+                shared_humor_switch,
+                fault_state=system_fault_state,
+                gpio_pin=settings_obj.hardware_humor_gpio_pin,
+                socket_port=settings_obj.hardware_override_socket_port,
+            )
+            hardware_state_controller.start()
+
+        tools = ToolRegistry(analytics, web_search, groq, peripheral_manager)
         memory_store = SQLiteMessageStore(settings_obj.memory_db_path)
         embeddings = EmbeddingBackend(settings_obj.memory_embedding_model)
         vector_index = FaissVectorIndex(settings_obj.memory_vector_index_path)
@@ -160,6 +243,7 @@ class SharedBackend:
                     latency_threshold_ms=settings_obj.falcon_scout_latency_threshold_ms,
                     db_latency_threshold_ms=settings_obj.falcon_scout_db_latency_threshold_ms,
                 ),
+                fault_state=system_fault_state,
             )
             falcon_task = asyncio.create_task(falcon_worker.run_forever())
 
@@ -193,6 +277,16 @@ class SharedBackend:
             falcon_task=falcon_task,
             memory_defragmenter=memory_defragmenter,
             memory_defrag_task=memory_defrag_task,
+            hal=hal,
+            system_fault_state=system_fault_state,
+            peripheral_manager=peripheral_manager,
+            vision_pipeline=vision_pipeline,
+            vision_task=vision_task,
+            head_tracking_state=head_tracking_state,
+            acoustic_localizer=acoustic_localizer,
+            localizer_task=localizer_task,
+            hardware_state_controller=hardware_state_controller,
+            shared_humor_switch=shared_humor_switch,
         )
 
     async def aclose(self) -> None:
@@ -206,6 +300,8 @@ class SharedBackend:
         for worker, task in (
             (self.falcon_worker, self.falcon_task),
             (self.memory_defragmenter, self.memory_defrag_task),
+            (self.vision_pipeline, self.vision_task),
+            (self.acoustic_localizer, self.localizer_task),
         ):
             if worker is not None:
                 worker.stop()
@@ -215,6 +311,10 @@ class SharedBackend:
                     await task
                 except asyncio.CancelledError:
                     pass
+        if self.peripheral_manager is not None:
+            self.peripheral_manager.stop()
+        if self.hardware_state_controller is not None:
+            await self.hardware_state_controller.stop()
 
 
 class ZaneMind:
@@ -242,7 +342,14 @@ class ZaneMind:
             self._owns_shared = True
 
         self.session_id = session_id or str(uuid.uuid4())
-        self.humor = HumorSwitch(self.settings.humor_enabled_default)
+        # One physical robot body has one humor state: if hardware is
+        # enabled, every session on this process shares the same
+        # HumorSwitch (so a hardware/Falcon-triggered lock affects the one
+        # real Zane, not just whichever chat session happened to trigger
+        # it). Otherwise each session gets its own, exactly as before.
+        self.humor = self._shared.shared_humor_switch or HumorSwitch(
+            self.settings.humor_enabled_default
+        )
         self.voice = VoiceSwitch(self.settings.voice_enabled_default)
         self.memory = PersistentMemory(
             session_id=self.session_id,
@@ -279,6 +386,30 @@ class ZaneMind:
     def tts(self) -> Optional[AsyncElevenLabsClient]:
         return self._shared.tts
 
+    async def _set_led_state(self, state: str) -> None:
+        """Best-effort reflection of Zane's operational mode on the
+        NeoPixel ring — never allowed to break a conversational turn. A
+        system-driven state transition (see zane/hardware/peripheral_io.py),
+        not an LLM tool: the model doesn't decide when it's "thinking,"
+        the orchestrator does. IDLE is only ever the ring's resting state
+        before the first request of the process; after that it settles
+        into THINKING/SPEAKING/ERROR as those transitions occur, which is
+        more informative than round-tripping through IDLE every turn with
+        no way to know when TTS playback has actually finished."""
+        peripheral_manager = self._shared.peripheral_manager
+        if peripheral_manager is None:
+            return
+        try:
+            await peripheral_manager.update_led_state(state)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to update peripheral LED state to %s.", state)
+
+    def _get_sensory_hud(self) -> Optional[str]:
+        vision_pipeline = self._shared.vision_pipeline
+        if vision_pipeline is None:
+            return None
+        return vision_pipeline.get_latest_hud()
+
     async def respond(
         self,
         user_input: str,
@@ -304,6 +435,7 @@ class ZaneMind:
             elapsed_ms = (time.monotonic() - start) * 1000
             return TurnResult(text=ice_protocol_text, tool_calls_made=[], elapsed_ms=elapsed_ms)
 
+        await self._set_led_state("THINKING")
         tool_calls_made: List[str] = []
 
         await self.memory.add_user_message(user_input)
@@ -314,6 +446,7 @@ class ZaneMind:
             mission_context=mission_context,
             relevant_memories=relevant_memories,
             conversation_summary=conversation_summary,
+            sensory_hud=self._get_sensory_hud(),
         )
         system_prompt = build_system_prompt(
             humor_enabled=self.humor.enabled, tools_enabled=True, context=context
@@ -326,6 +459,7 @@ class ZaneMind:
                 completion = await self.groq.chat_completion(messages, tools=self.tools.schemas())
             except GroqUnavailableError as exc:
                 logger.error("Groq unavailable: %s", exc)
+                await self._set_led_state("ERROR")
                 fallback_text = _OFFLINE_FALLBACK.format(detail=str(exc))
                 audio, audio_format = await synthesize_with_fallback(
                     self.tts, self.voice.enabled, fallback_text
@@ -372,6 +506,7 @@ class ZaneMind:
 
             final_text = message.content or ""
             await self.memory.add_assistant_message(final_text)
+            await self._set_led_state("SPEAKING")
             audio, audio_format = await synthesize_with_fallback(
                 self.tts, self.voice.enabled, final_text
             )
@@ -388,6 +523,7 @@ class ZaneMind:
             "I apologize; I was unable to resolve this within my allotted "
             "analytical cycles. Might I suggest rephrasing your request?"
         )
+        await self._set_led_state("SPEAKING")
         audio, audio_format = await synthesize_with_fallback(
             self.tts, self.voice.enabled, exhausted_text
         )
