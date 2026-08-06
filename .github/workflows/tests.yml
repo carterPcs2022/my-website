@@ -1,0 +1,58 @@
+name: Tests
+
+# Runs the full pytest suite on every push to the default branch and every
+# pull request, in two configurations: with the real zane_cpp C++
+# extension built (the same path production's Dockerfile uses) and
+# without it (the pure-Python analytics fallback every deployment falls
+# back to if the extension isn't present — see zane/analytics_bridge.py).
+# Both are first-class supported paths, so both get their own CI job
+# rather than only ever testing whichever one happens to be built.
+on:
+  push:
+    branches: [claude/zane-ninjago-hybrid-arch-741xhg]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-native:
+    name: Test (native C++ engine)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build the zane_cpp extension
+        run: pip install -e .
+
+      - name: Run test suite
+        run: pytest -q
+
+  test-fallback:
+    name: Test (pure-Python fallback, no C++ build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies (zane_cpp intentionally left unbuilt)
+        run: pip install -r requirements.txt
+
+      - name: Run test suite against the pure-Python analytics fallback
+        run: pytest -q

@@ -1,5 +1,7 @@
 # Zane — Digital Mind
 
+[![Tests](https://github.com/carterPcs2022/my-website/actions/workflows/tests.yml/badge.svg)](https://github.com/carterPcs2022/my-website/actions/workflows/tests.yml)
+
 A hybrid C++/Python cognitive architecture for **Zane**: ultra-fast LLM
 responses via **Groq**, a live web-search pipeline for "infinite
 information," and a thread-safe C++ engine for his analytical/probability
@@ -622,6 +624,16 @@ starts fresh each time the container restarts.
 ```bash
 pytest
 ```
+
+**Continuous integration** (`.github/workflows/tests.yml`) runs the full
+suite on every push to the default branch and every pull request, in two
+separate jobs — one with `zane_cpp` actually built (the same path
+production's Dockerfile takes), one with it deliberately left unbuilt so
+the pure-Python analytics fallback gets its own real verification rather
+than only ever being exercised incidentally. Both are first-class
+supported paths (see `zane/analytics_bridge.py`), so both get checked on
+every change instead of assuming whichever one happens to be built locally
+is representative.
 
 Tests exercise the personality prompt builder, the analytics engine (using
 whichever backend — native or pure-Python fallback — is available in the
