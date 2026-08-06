@@ -112,4 +112,9 @@ async def test_dispatch_malformed_arguments(registry):
 
 def test_schemas_include_all_tools(registry):
     names = {schema["function"]["name"] for schema in registry.schemas()}
-    assert names == {"web_search", "calculate_success_probability", "translate_text"}
+    assert names == {
+        "web_search",
+        "calculate_success_probability",
+        "translate_text",
+        "query_wolfram_alpha",
+    }

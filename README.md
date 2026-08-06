@@ -27,9 +27,11 @@ zane/                     High-level AI layer (Python)
     summarizer.py                  LLM-driven summarization of aged-out history
     persistent.py                  PersistentMemory: ties the above together
     memory_defragmenter.py         RAG conflict detection + resolution (opt-in)
+  knowledge_manager.py            Multi-namespace RAG: chat memory + static archival lore
   tools/
     web_search.py                Tavily/DuckDuckGo search tool
     translate.py                  LLM-backed translation tool
+    wolfram_tool.py                Wolfram|Alpha analytical math tool + safe local fallback
     registry.py                   LLM function-calling schema + dispatch
   voice/
     tts.py                        Async ElevenLabs client + fallback helper
@@ -54,6 +56,7 @@ zane/                     High-level AI layer (Python)
 Dockerfile / render.yaml     Container deployment (see "Deploying to Render")
 requirements-core.txt        Light deps; requirements-memory.txt adds the heavy RAG stack
 requirements-hardware.txt    Raspberry Pi only — never installed by Docker/CI, see "Physical hardware"
+data/raw_lore.txt            Source text for the archival lore database (compile with knowledge_manager.py)
 ```
 
 ### Why C++ + Python?
@@ -241,6 +244,98 @@ autonomously deletes data (however conservatively gated),
 `ZANE_MEMORY_DEFRAG_ENABLED` defaults to `false` — an intentionally higher
 bar to opt into than Falcon Scout's pure observability.
 
+### Archival lore database: `zane/knowledge_manager.py`
+
+A second, physically separate RAG namespace alongside organic chat
+memory — a static, immutable "Ninjago Lore Database" that never mixes
+with (or gets diluted/polluted by) live conversation history.
+`KnowledgeManager` is a *conceptual* singleton: `SharedBackend.build()`
+constructs exactly one instance per process and every session shares it,
+the same pattern already used for `AnalyticsEngine`/`EmbeddingBackend`/
+etc. — not a language-level singleton (`__new__` override / module
+global), which would fight this codebase's dependency-injection-based
+testing conventions (every test here constructs fresh instances against
+fakes; a hard singleton would make that impossible).
+
+Isolation is physical, not just logical: `ninjago_lore` is backed by its
+own `FaissVectorIndex` bound to `data/ninjago_lore.index` (and a JSON
+metadata sidecar, `data/ninjago_lore.json` — read-only at request time;
+only `compile_lore_database` ever writes to it), entirely separate from
+the chat-memory `FaissVectorIndex` `PersistentMemory` already uses. Lore
+vectors are never added to the chat index or vice versa, so an
+`[ARCHIVAL_LORE_DATABASE]`-tagged hit can never be confused with an
+`[HISTORICAL_CONTEXT]`-tagged one.
+
+`query_all_knowledge_sources(query_text, user_memory, top_k)` embeds the
+query exactly once and searches both namespaces concurrently
+(`asyncio.gather`), reusing that single vector for both — including
+inside `PersistentMemory.retrieve_relevant`, which gained an optional
+`query_vector` parameter specifically so it doesn't need to re-embed
+identical text a caller already embedded. This is what `ZaneMind.respond()`
+now calls instead of `PersistentMemory.retrieve_relevant` directly,
+feeding the combined, tagged result straight into the same
+`PersonaContext.relevant_memories` block used before — no new,
+overlapping context-injection mechanism.
+
+`compile_lore_database(source_text_file)` is the offline build step:
+deterministic paragraph-aware chunking (same input always produces the
+same chunks — greedily packs whole paragraphs up to a size limit, falling
+back to fixed-size overlapping windows only for a single paragraph that
+alone exceeds it), local embedding, and a from-scratch FAISS index +
+JSON metadata write. It's a CLI script too:
+
+```bash
+python -m zane.knowledge_manager data/raw_lore.txt
+```
+
+`data/raw_lore.txt` (committed) is real source lore content — Destiny's
+Bounty (including its treaded "Land Bounty" land-traversal configuration)
+and Zane's own background — the compiled `.index`/`.json` are gitignored
+build artifacts, like `zane_cpp.so`; run the command above locally to
+generate them (requires network access the first time, to download the
+sentence-transformers model — unavailable in this project's own sandbox,
+where the chunking/indexing mechanics were instead verified end-to-end
+against a deterministic fake embedding backend, and the real embedding
+model failing without network access was confirmed to fail loudly with a
+clear error, by design, rather than silently produce an empty database).
+
+### Wolfram|Alpha analytical math tool: `zane/tools/wolfram_tool.py`
+
+An explicit LLM tool for objective, computed answers — "exact structural
+calculations, material stresses, torque requirements, or verifying
+mathematical realities" — rather than relying on an LLM's own arithmetic,
+which is unreliable for exactly this class of query.
+
+Two corrections from the original spec worth noting: the real Wolfram
+host is `www.wolframalpha.com` over **HTTPS** (`http://wolframalpha.com`
+would send the API key in plaintext, and isn't the right host regardless);
+and of Wolfram's API products, this uses the **LLM API**
+(`/api/v1/llm-api`) specifically, since it's what Wolfram built for this
+exact tool-calling use case and returns plain text directly — the "Full
+Results API" returns structured XML/JSON "pods" that would need real
+parsing logic to turn into clean text, not worth that complexity without
+a live key to verify the actual response shape against.
+
+On any failure — no `WOLFRAM_APP_ID` configured, a network error, a
+non-200 or empty response — `query_wolfram_alpha` logs the mandated
+`"[SYSTEM LOG]: Wolfram engine unavailable. Commencing local fallback
+calculation."` notice and falls back to `safe_local_eval`: a restricted,
+`ast`-based arithmetic evaluator (numeric literals, `+ - * / ** % //`,
+parentheses, and a small whitelist of `math` functions/constants) —
+**never Python's real `eval()`** on the LLM-supplied query text (verified
+this matters: a literal code-injection attempt like
+`__import__("os").system(...)` is safely rejected, returning `None`
+rather than executing). This handles a genuine, meaningful subset of
+"verifying mathematical realities" — literal expressions — but is
+explicitly not a natural-language physics/materials solver: an NL query
+Wolfram can't be reached for gets an honest "cannot verify this without
+Wolfram" response, never a fabricated plausible-sounding number, since
+that would reintroduce the exact failure mode this tool exists to avoid.
+Unlike `engage_cryo_discharge`, this tool is always advertised/available
+(`WOLFRAM_APP_ID` unset just means it always uses the local fallback),
+since it degrades to something genuinely useful rather than needing a
+hardware safety gate.
+
 ### Physical hardware: `zane/hardware/`
 
 The final integration layer, bridging the LLM/C++ core to real robotic
@@ -412,6 +507,25 @@ runs. The real sentence-transformers model requires downloading weights
 on first use; `tests/test_embeddings.py` skips its real-model assertions
 (rather than failing) in offline environments while still testing failure
 handling.
+
+The archival lore pipeline (`tests/test_knowledge_manager.py`) is tested
+against real SQLite/FAISS/JSON I/O with a deterministic fake embedding
+backend (the same pattern as the persistent-memory tests, for the same
+offline-sandbox reason): deterministic paragraph-aware chunking (packing,
+oversized-paragraph splitting, empty input), `compile_lore_database`
+failure modes (missing/empty source file), an end-to-end compile of the
+real `data/raw_lore.txt` shipped in this repo, and — the important
+guarantee — namespace isolation: a test deliberately compiles lore content
+designed to score high against a chat-history query, then confirms the
+two never cross-contaminate because they live in physically separate
+FAISS indices, plus that `query_all_knowledge_sources` tags each hit
+correctly and runs both lookups concurrently off a single shared
+embedding call. The Wolfram tool (`tests/test_wolfram_tool.py`) tests
+`WolframAlphaClient` against a real `httpx.MockTransport` (success,
+non-200, empty response, network error, missing app ID) and the full
+`query_wolfram_alpha` fallback chain down to the local `ast`-based
+evaluator, including that it rejects real code-injection payloads and
+never fabricates an answer for a query it can't resolve.
 
 ## Extending to a new surface
 

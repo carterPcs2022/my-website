@@ -141,6 +141,36 @@ async def test_retrieval_relevance_ranking_excludes_recent_window(db_path, index
         assert "fire flame heat lava volcano" not in results[0]
 
 
+async def test_retrieve_relevant_accepts_precomputed_query_vector(db_path, index_path, monkeypatch):
+    memory = make_memory(
+        db_path, index_path, session_id="precomputed-vector-test",
+        rolling_max_messages=2, retrieval_top_k=2,
+        retention_window=1000, summarize_after_n=1000,
+    )
+    await memory.add_user_message("ice frost winter snow cold")
+    await memory.add_user_message("completely unrelated filler about shoes")
+    await memory.add_user_message("more filler about spreadsheets")
+    await memory.add_user_message("even more filler about paperwork")
+
+    embed_calls = []
+    original_embed = memory._embeddings.embed
+
+    def _spying_embed(text):
+        embed_calls.append(text)
+        return original_embed(text)
+
+    monkeypatch.setattr(memory._embeddings, "embed", _spying_embed)
+
+    precomputed = original_embed("ice frost cold")
+    results = await memory.retrieve_relevant("ice frost cold", query_vector=precomputed)
+
+    assert results, "expected at least one retrieved result"
+    assert "ice frost winter snow cold" in results[0]
+    # The precomputed vector must be used directly — retrieve_relevant
+    # itself must not call .embed() again for the query text.
+    assert embed_calls == []
+
+
 async def test_retrieve_relevant_never_returns_recent_window_messages(db_path, index_path):
     memory = make_memory(
         db_path, index_path, session_id="dedupe-test",

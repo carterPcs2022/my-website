@@ -29,6 +29,7 @@ from zane.hardware.hardware_state_controller import HardwareStateController
 from zane.hardware.peripheral_io import PeripheralManager
 from zane.hardware.sensory_localization import AcousticLocalizer, HeadTrackingState
 from zane.hardware.vision_processor import VisionPipeline
+from zane.knowledge_manager import KnowledgeManager
 from zane.memory.embeddings import EmbeddingBackend
 from zane.memory.memory_defragmenter import MemoryDefragmenter
 from zane.memory.persistent import PersistentMemory, PersistentMemoryConfig
@@ -39,6 +40,7 @@ from zane.personality import HumorSwitch, PersonaContext, build_system_prompt
 from zane.thermal_monitor import IceProtocolState, ThermalMonitor, maybe_handle_ice_protocol
 from zane.tools.registry import ToolRegistry
 from zane.tools.web_search import WebSearchTool
+from zane.tools.wolfram_tool import WolframAlphaClient
 from zane.voice.switch import VoiceSwitch
 from zane.voice.tts import AsyncElevenLabsClient, TextToSpeechError, synthesize_with_fallback
 
@@ -119,6 +121,14 @@ class SharedBackend:
     # session. Only set when hardware is enabled — see ZaneMind.__init__,
     # which falls back to a private per-session HumorSwitch otherwise.
     shared_humor_switch: Optional[HumorSwitch]
+    # Multi-namespace RAG (zane/knowledge_manager.py): always present,
+    # searches organic chat memory alongside the static archival lore
+    # index (empty/harmless until compile_lore_database() has been run).
+    knowledge_manager: KnowledgeManager
+    # Wolfram|Alpha analytical math tool: always present so the tool stays
+    # advertised even without WOLFRAM_APP_ID, degrading to a local
+    # restricted-arithmetic fallback (see zane/tools/wolfram_tool.py).
+    wolfram_client: WolframAlphaClient
 
     @classmethod
     def build(cls, settings_obj: Settings) -> "SharedBackend":
@@ -196,11 +206,21 @@ class SharedBackend:
             )
             hardware_state_controller.start()
 
-        tools = ToolRegistry(analytics, web_search, groq, peripheral_manager)
         memory_store = SQLiteMessageStore(settings_obj.memory_db_path)
         embeddings = EmbeddingBackend(settings_obj.memory_embedding_model)
         vector_index = FaissVectorIndex(settings_obj.memory_vector_index_path)
         summarizer = ConversationSummarizer(groq)
+
+        knowledge_manager = KnowledgeManager(
+            embeddings,
+            lore_index_path=settings_obj.lore_index_path,
+            lore_metadata_path=settings_obj.lore_metadata_path,
+        )
+        wolfram_client = WolframAlphaClient(
+            app_id=settings_obj.wolfram_app_id, timeout_s=settings_obj.wolfram_timeout_s
+        )
+
+        tools = ToolRegistry(analytics, web_search, groq, peripheral_manager, wolfram_client)
 
         tts: Optional[AsyncElevenLabsClient] = None
         if settings_obj.elevenlabs_api_key and settings_obj.elevenlabs_voice_id:
@@ -287,12 +307,15 @@ class SharedBackend:
             localizer_task=localizer_task,
             hardware_state_controller=hardware_state_controller,
             shared_humor_switch=shared_humor_switch,
+            knowledge_manager=knowledge_manager,
+            wolfram_client=wolfram_client,
         )
 
     async def aclose(self) -> None:
         await self.groq.close()
         self.analytics.shutdown()
         self.memory_store.close()
+        await self.wolfram_client.close()
         if self.tts is not None:
             await self.tts.close()
         if self.thermal_monitor is not None:
@@ -386,6 +409,10 @@ class ZaneMind:
     def tts(self) -> Optional[AsyncElevenLabsClient]:
         return self._shared.tts
 
+    @property
+    def knowledge_manager(self) -> KnowledgeManager:
+        return self._shared.knowledge_manager
+
     async def _set_led_state(self, state: str) -> None:
         """Best-effort reflection of Zane's operational mode on the
         NeoPixel ring — never allowed to break a conversational turn. A
@@ -439,7 +466,13 @@ class ZaneMind:
         tool_calls_made: List[str] = []
 
         await self.memory.add_user_message(user_input)
-        relevant_memories = await self.memory.retrieve_relevant(user_input)
+        # Unified RAG lookup: embeds user_input once, searches organic chat
+        # memory and the static archival lore database concurrently, and
+        # returns both as tagged entries in the same list — see
+        # zane/knowledge_manager.py.
+        relevant_memories = await self._shared.knowledge_manager.query_all_knowledge_sources(
+            user_input, self.memory, top_k=self.settings.memory_retrieval_top_k
+        )
         conversation_summary = self.memory.get_latest_summary()
         context = PersonaContext(
             addressed_by=addressed_by,

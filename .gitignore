@@ -24,3 +24,10 @@ compile_commands.json
 *.sqlite3-wal
 *.sqlite3-shm
 *.faiss
+
+# Compiled archival lore database (build artifact of compile_lore_database,
+# like zane_cpp.so — data/raw_lore.txt, the real source content, IS
+# committed; run `python -m zane.knowledge_manager data/raw_lore.txt` to
+# (re)build these locally)
+data/*.index
+data/ninjago_lore.json

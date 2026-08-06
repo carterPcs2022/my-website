@@ -245,6 +245,26 @@ class Settings:
         default_factory=lambda: _env_optional_int("ZANE_HARDWARE_OVERRIDE_SOCKET_PORT")
     )
 
+    # --- Archival lore database (zane/knowledge_manager.py) ---
+    lore_index_path: str = field(
+        default_factory=lambda: os.getenv("ZANE_LORE_INDEX_PATH", "data/ninjago_lore.index")
+    )
+    lore_metadata_path: str = field(
+        default_factory=lambda: os.getenv("ZANE_LORE_METADATA_PATH", "data/ninjago_lore.json")
+    )
+    lore_retrieval_top_k: int = field(
+        default_factory=lambda: _env_int("ZANE_LORE_RETRIEVAL_TOP_K", 3)
+    )
+
+    # --- Wolfram|Alpha analytical math tool (zane/tools/wolfram_tool.py) ---
+    # Never hardcoded — the tool remains usable without this: it falls
+    # back to a local restricted-arithmetic evaluator (see the module's
+    # docstring for what that fallback can and can't resolve).
+    wolfram_app_id: Optional[str] = field(default_factory=lambda: os.getenv("WOLFRAM_APP_ID"))
+    wolfram_timeout_s: float = field(
+        default_factory=lambda: _env_float("WOLFRAM_TIMEOUT_S", 10.0)
+    )
+
     def validate_for_groq(self) -> None:
         if not self.groq_api_key:
             raise RuntimeError(

@@ -12,6 +12,7 @@ from zane.groq_client import AsyncGroqClient
 from zane.hardware.peripheral_io import CRYO_DISCHARGE_TOOL_SCHEMA, PeripheralManager
 from zane.tools.translate import TRANSLATE_TOOL_SCHEMA, translate_text
 from zane.tools.web_search import WEB_SEARCH_TOOL_SCHEMA, WebSearchTool
+from zane.tools.wolfram_tool import WOLFRAM_TOOL_SCHEMA, WolframAlphaClient, query_wolfram_alpha
 
 logger = logging.getLogger("zane.tools.registry")
 
@@ -72,6 +73,7 @@ class ToolRegistry:
         web_search: WebSearchTool,
         groq_client: AsyncGroqClient,
         peripheral_manager: Optional[PeripheralManager] = None,
+        wolfram_client: Optional[WolframAlphaClient] = None,
     ) -> None:
         self._analytics = analytics
         self._web_search = web_search
@@ -80,9 +82,18 @@ class ToolRegistry:
         # SharedBackend.build(). A session with no PeripheralManager never
         # advertises engage_cryo_discharge as a tool at all.
         self._peripheral_manager = peripheral_manager
+        # Always present (see SharedBackend.build()) — the tool stays
+        # advertised/usable even without WOLFRAM_APP_ID configured, since
+        # it degrades to a local fallback rather than being unavailable.
+        self._wolfram_client = wolfram_client
 
     def schemas(self) -> List[Dict[str, Any]]:
-        schemas = [WEB_SEARCH_TOOL_SCHEMA, CALCULATE_PROBABILITY_TOOL_SCHEMA, TRANSLATE_TOOL_SCHEMA]
+        schemas = [
+            WEB_SEARCH_TOOL_SCHEMA,
+            CALCULATE_PROBABILITY_TOOL_SCHEMA,
+            TRANSLATE_TOOL_SCHEMA,
+            WOLFRAM_TOOL_SCHEMA,
+        ]
         if self._peripheral_manager is not None:
             schemas.append(CRYO_DISCHARGE_TOOL_SCHEMA)
         return schemas
@@ -129,6 +140,9 @@ class ToolRegistry:
                     return "TOOL_ERROR: engage_cryo_discharge is not available in this session."
                 duration_seconds = float(args.get("duration_seconds", 0.0))
                 return await self._peripheral_manager.engage_cryo_discharge(duration_seconds)
+
+            if name == "query_wolfram_alpha":
+                return await query_wolfram_alpha(args["query"], self._wolfram_client)
 
             return f"TOOL_ERROR: unknown tool '{name}'"
         except Exception as exc:  # noqa: BLE001 - tool failures must not crash the chat loop
