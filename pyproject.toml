@@ -5,3 +5,10 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Without this, `zane` is only importable when something has installed it
+# as a side effect (e.g. `pip install -e .` for the native C++ build) —
+# a bare `pytest` invocation with no install at all (exactly what CI's
+# pure-Python-fallback job runs) can't find the package otherwise, since
+# unlike `python -m pytest`, the `pytest` console script doesn't add the
+# current directory to sys.path on its own.
+pythonpath = ["."]

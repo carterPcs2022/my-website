@@ -39,7 +39,7 @@ jobs:
         run: pip install -e .
 
       - name: Run test suite
-        run: pytest -q
+        run: python -m pytest -q
 
   test-fallback:
     name: Test (pure-Python fallback, no C++ build)
@@ -56,4 +56,4 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run test suite against the pure-Python analytics fallback
-        run: pytest -q
+        run: python -m pytest -q
