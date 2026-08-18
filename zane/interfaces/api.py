@@ -25,19 +25,25 @@ isn't needed yet and isn't implemented here.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from zane.config import settings
 from zane.core import SharedBackend, ZaneMind
 from zane.groq_client import GroqUnavailableError
 from zane.interfaces.base import ZaneInterface
+from zane.voice.speaker_verification import (
+    SpeakerVerificationAudioError,
+    SpeakerVerificationUnavailableError,
+    get_verifier,
+)
 
 logger = logging.getLogger("zane.interfaces.api")
 
@@ -74,6 +80,27 @@ class CommandRequest(BaseModel):
 
 class CommandResponse(BaseModel):
     result: str
+
+
+class VoiceEnrollResponse(BaseModel):
+    speaker_id: str
+    samples: int = Field(..., description="Total samples now stored for this speaker.")
+
+
+class VoiceVerifyResponse(BaseModel):
+    verified: bool
+    speaker_id: Optional[str] = Field(None, description="Best-matching enrolled speaker, if verified.")
+    similarity: float = Field(..., description="Cosine similarity of the best match, in [-1, 1].")
+    threshold: float
+
+
+class SpeakerInfo(BaseModel):
+    speaker_id: str
+    samples: int
+
+
+class SpeakerListResponse(BaseModel):
+    speakers: List[SpeakerInfo]
 
 
 class APIInterface(ZaneInterface):
@@ -194,3 +221,58 @@ async def end_session(session_id: str) -> Dict[str, str]:
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+# --- Speaker verification (voice biometrics) ---
+#
+# Deliberately separate from /chat: this is an identity check on a raw
+# audio clip, not part of the conversational turn shape. See
+# zane/voice/speaker_verification.py for the enrollment/matching logic and
+# requirements-voice-verify.txt for the (optional) dependency.
+
+
+@app.post("/voice/enroll", response_model=VoiceEnrollResponse)
+async def voice_enroll(
+    speaker_id: str = Form(..., min_length=1),
+    audio: UploadFile = File(...),
+) -> VoiceEnrollResponse:
+    verifier = get_verifier()
+    audio_bytes = await audio.read()
+    try:
+        result = await asyncio.to_thread(verifier.enroll, speaker_id, audio_bytes)
+    except SpeakerVerificationUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except SpeakerVerificationAudioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return VoiceEnrollResponse(**result)
+
+
+@app.post("/voice/verify", response_model=VoiceVerifyResponse)
+async def voice_verify(
+    audio: UploadFile = File(...),
+    speaker_id: Optional[str] = Form(None),
+) -> VoiceVerifyResponse:
+    verifier = get_verifier()
+    audio_bytes = await audio.read()
+    try:
+        result = await asyncio.to_thread(verifier.verify, audio_bytes, speaker_id)
+    except SpeakerVerificationUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except SpeakerVerificationAudioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return VoiceVerifyResponse(**{k: v for k, v in result.items() if k != "error"})
+
+
+@app.get("/voice/speakers", response_model=SpeakerListResponse)
+async def voice_list_speakers() -> SpeakerListResponse:
+    return SpeakerListResponse(speakers=get_verifier().list_speakers())
+
+
+@app.delete("/voice/speakers/{speaker_id}")
+async def voice_delete_speaker(speaker_id: str) -> Dict[str, object]:
+    existed = await asyncio.to_thread(get_verifier().delete_speaker, speaker_id)
+    if not existed:
+        raise HTTPException(status_code=404, detail=f"No enrolled profile for {speaker_id!r}")
+    return {"deleted": True, "speaker_id": speaker_id}

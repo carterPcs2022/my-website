@@ -27,3 +27,5 @@ services:
         value: "false"
       - key: ZANE_HUMOR_DEFAULT
         value: "false"
+      - key: SPEAKER_VERIFY_THRESHOLD
+        value: "0.75"

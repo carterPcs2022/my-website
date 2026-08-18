@@ -182,6 +182,42 @@ source) so it can be swapped independently per deployment.
   `/chat` schema). Toggle voice per session via `POST /command`
   (`{"command": "voice"}`), same as `humor`.
 
+### Voice: optional speaker verification (voice biometrics)
+
+`zane/voice/speaker_verification.py` provides voice-biometric identity
+checking, independent of the ElevenLabs TTS pipeline above and unrelated
+to `/chat` — it's identity verification on a raw audio clip, not part of
+a conversational turn. Server-wide (not per-session): enrolled voiceprints
+live in one JSON file (`SPEAKER_PROFILES_PATH`, default
+`zane_speaker_profiles.json`), not per-`ZaneMind`.
+
+Backed by [Resemblyzer](https://github.com/resemble-ai/Resemblyzer)'s
+pretrained speaker-encoder model (CPU inference — no GPU needed for a few
+seconds of audio). Same degrade-gracefully shape as TTS: without the
+optional `resemblyzer` package (which pulls in `torch`) installed, the
+`/voice/*` routes return `503` instead of crashing the process; nothing
+else is affected.
+
+- `POST /voice/enroll` — multipart form (`speaker_id`, `audio` file, WAV/
+  FLAC). Adds one more sample to that speaker's voiceprint; up to
+  `SPEAKER_VERIFY_MAX_SAMPLES` (default 10) recent samples are kept and
+  averaged into a centroid embedding for a more robust reference than a
+  single utterance.
+- `POST /voice/verify` — multipart form (`audio` file, optional
+  `speaker_id`). Omit `speaker_id` to match against every enrolled
+  speaker and return the best one; pass it to check against just that
+  speaker. Response: `{"verified": bool, "speaker_id": ..., "similarity":
+  ..., "threshold": ...}`. `similarity` is a cosine similarity in
+  `[-1, 1]`; a match requires it to clear `SPEAKER_VERIFY_THRESHOLD`
+  (default `0.75`).
+- `GET /voice/speakers` / `DELETE /voice/speakers/{speaker_id}` — list or
+  remove enrolled profiles.
+
+**Audio format**: send WAV or FLAC. Those decode via `soundfile` (bundles
+its own `libsndfile`, no system package needed). Compressed formats like
+MP3 fall back to `audioread`, which needs `ffmpeg` on the host — not
+installed in this project's Docker image.
+
 ### Vehicle telemetry / driving-sim connector: `zane/control.py`
 
 `ZaneSensorInput`/`ZaneControlOutput` started as unimplemented, generic
@@ -598,6 +634,10 @@ an interactive terminal, which a Render web service doesn't give you.
    `render.yaml` (`GROQ_API_KEY` required; `TAVILY_API_KEY`,
    `ELEVENLABS_API_KEY`, `ZANE_VOICE_ID` optional) — set them there, in
    Render's dashboard. Never in this repo, never pasted in chat.
+   Speaker verification needs no secret env var — it's local voice-model
+   inference, not a third-party API — but note its `SPEAKER_PROFILES_PATH`
+   file is subject to the same ephemeral-filesystem caveat as the memory
+   paths below.
 3. Deploy. `/health` is wired as the health check path.
 
 **If the build is too slow/heavy for your Render plan**: the C++
@@ -609,7 +649,10 @@ part of the image. Set the Docker build arg `INSTALL_MEMORY_EXTRAS=false`
 `requirements-memory.txt` entirely — Zane still runs fully; only semantic
 memory retrieval and background summarization go quiet (see "Memory"
 above; `PersistentMemory` was built to degrade gracefully for exactly this
-kind of case, not just for missing network access).
+kind of case, not just for missing network access). The same applies to
+speaker verification's `INSTALL_SPEAKER_VERIFY=false` build arg (skips
+`requirements-voice-verify.txt`, another `torch`-pulling dependency) —
+`/voice/*` routes then return `503` instead of failing the build.
 
 **Persistent memory across restarts**: Render web services have an
 *ephemeral* filesystem by default — `ZANE_MEMORY_DB_PATH` and

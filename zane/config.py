@@ -146,6 +146,21 @@ class Settings:
         default_factory=lambda: _env_bool("ZANE_VOICE_DEFAULT", False)
     )
 
+    # --- Speaker verification (voice biometrics, Resemblyzer) ---
+    speaker_profiles_path: str = field(
+        default_factory=lambda: os.getenv("SPEAKER_PROFILES_PATH", "zane_speaker_profiles.json")
+    )
+    # Cosine similarity cutoff for a verify() call to count as a match.
+    # Resemblyzer embeddings for the same speaker typically score >0.85;
+    # different speakers usually land well under 0.7. 0.75 leaves a margin
+    # on both sides as a starting default — tune per deployment.
+    speaker_verify_threshold: float = field(
+        default_factory=lambda: _env_float("SPEAKER_VERIFY_THRESHOLD", 0.75)
+    )
+    speaker_verify_max_samples: int = field(
+        default_factory=lambda: _env_int("SPEAKER_VERIFY_MAX_SAMPLES", 10)
+    )
+
     # --- Ice Protocol (thermal safety governor) ---
     # Defaults OFF: psutil sensor access is unavailable in most container/
     # cloud deployments (including this project's own Render/Docker

@@ -1,0 +1,9 @@
+# Speaker verification (voice biometrics), optional: /voice/enroll and
+# /voice/verify return 503 without this installed. Zane still runs fully
+# otherwise — see zane/voice/speaker_verification.py.
+#
+# Resemblyzer pulls in torch; like requirements-memory.txt's
+# sentence-transformers, that's the heavy part of this file. CPU-only
+# inference is fine here — embedding a few seconds of audio is fast even
+# without a GPU.
+resemblyzer>=0.1.4
