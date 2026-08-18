@@ -17,11 +17,21 @@ WORKDIR /app
 #   docker build --build-arg INSTALL_MEMORY_EXTRAS=false .
 ARG INSTALL_MEMORY_EXTRAS=true
 
-COPY requirements-core.txt requirements-memory.txt ./
+# Toggle speaker verification (Resemblyzer, which also pulls in torch —
+# see requirements-voice-verify.txt). Independent of INSTALL_MEMORY_EXTRAS
+# since a deployment may want one without the other. Zane degrades
+# gracefully without it: /voice/enroll and /voice/verify return 503,
+# nothing else is affected.
+ARG INSTALL_SPEAKER_VERIFY=true
+
+COPY requirements-core.txt requirements-memory.txt requirements-voice-verify.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements-core.txt \
     && if [ "$INSTALL_MEMORY_EXTRAS" = "true" ]; then \
          pip install --no-cache-dir -r requirements-memory.txt; \
+       fi \
+    && if [ "$INSTALL_SPEAKER_VERIFY" = "true" ]; then \
+         pip install --no-cache-dir -r requirements-voice-verify.txt; \
        fi
 
 COPY cpp ./cpp

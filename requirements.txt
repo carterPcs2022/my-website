@@ -3,6 +3,7 @@
 # see requirements-core.txt / requirements-memory.txt and Dockerfile.
 -r requirements-core.txt
 -r requirements-memory.txt
+-r requirements-voice-verify.txt
 
 # Tests
 pytest>=8.0.0
