@@ -45,6 +45,16 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_optional_int(name: str) -> Optional[int]:
+    val = os.getenv(name)
+    if val is None or val == "":
+        return None
+    try:
+        return int(val)
+    except ValueError:
+        return None
+
+
 @dataclass
 class Settings:
     # --- Groq ---
@@ -59,10 +69,22 @@ class Settings:
 
     # --- Web search ---
     tavily_api_key: Optional[str] = field(default_factory=lambda: os.getenv("TAVILY_API_KEY"))
+    # Never hardcoded — see zane/tools/web_search.py's module docstring for
+    # the auto-backend priority order (Tavily > SerpAPI > Serper > DuckDuckGo).
+    serpapi_api_key: Optional[str] = field(default_factory=lambda: os.getenv("SERPAPI_API_KEY"))
+    serper_api_key: Optional[str] = field(default_factory=lambda: os.getenv("SERPER_API_KEY"))
     search_max_results: int = field(default_factory=lambda: _env_int("SEARCH_MAX_RESULTS", 5))
     search_backend: str = field(
         default_factory=lambda: os.getenv("SEARCH_BACKEND", "auto")
-    )  # "auto" | "tavily" | "duckduckgo"
+    )  # "auto" | "tavily" | "serpapi" | "serper" | "duckduckgo"
+
+    # --- Page fetch tool (zane/tools/fetch_page.py) ---
+    fetch_page_timeout_s: float = field(
+        default_factory=lambda: _env_float("FETCH_PAGE_TIMEOUT_S", 10.0)
+    )
+    fetch_page_max_chars: int = field(
+        default_factory=lambda: _env_int("FETCH_PAGE_MAX_CHARS", 6000)
+    )
 
     # --- Personality ---
     humor_enabled_default: bool = field(
@@ -137,6 +159,148 @@ class Settings:
     )
     speaker_verify_max_samples: int = field(
         default_factory=lambda: _env_int("SPEAKER_VERIFY_MAX_SAMPLES", 10)
+    )
+
+    # --- Ice Protocol (thermal safety governor) ---
+    # Defaults OFF: psutil sensor access is unavailable in most container/
+    # cloud deployments (including this project's own Render/Docker
+    # target — see zane/thermal_monitor.py's module docstring), so this is
+    # meant to be opted into on bare-metal/local/robotics deployments.
+    ice_protocol_enabled: bool = field(
+        default_factory=lambda: _env_bool("ZANE_ICE_PROTOCOL_ENABLED", False)
+    )
+    ice_protocol_threshold_c: float = field(
+        default_factory=lambda: _env_float("ZANE_ICE_PROTOCOL_THRESHOLD_C", 75.0)
+    )
+    ice_protocol_hysteresis_c: float = field(
+        default_factory=lambda: _env_float("ZANE_ICE_PROTOCOL_HYSTERESIS_C", 5.0)
+    )
+    ice_protocol_poll_interval_s: float = field(
+        default_factory=lambda: _env_float("ZANE_ICE_PROTOCOL_POLL_INTERVAL_S", 5.0)
+    )
+
+    # --- Falcon Scout (system log/health daemon) ---
+    # Defaults ON: pure observability, no behavioral side effects on
+    # responses (unlike the Ice Protocol or the memory defragmenter below).
+    falcon_scout_enabled: bool = field(
+        default_factory=lambda: _env_bool("ZANE_FALCON_SCOUT_ENABLED", True)
+    )
+    falcon_scout_interval_s: float = field(
+        default_factory=lambda: _env_float("ZANE_FALCON_SCOUT_INTERVAL_S", 60.0)
+    )
+    falcon_scout_latency_threshold_ms: float = field(
+        default_factory=lambda: _env_float("ZANE_FALCON_SCOUT_LATENCY_THRESHOLD_MS", 1500.0)
+    )
+    falcon_scout_db_latency_threshold_ms: float = field(
+        default_factory=lambda: _env_float("ZANE_FALCON_SCOUT_DB_LATENCY_THRESHOLD_MS", 200.0)
+    )
+
+    # --- Memory Defragmenter (RAG conflict resolution) ---
+    # Defaults OFF: unlike Falcon Scout, this autonomously deletes memory
+    # rows (only ever on an explicit LLM-confirmed conflict — see
+    # zane/memory/memory_defragmenter.py — but still a real, conservative
+    # opt-in given the consequence of a mistake).
+    memory_defrag_enabled: bool = field(
+        default_factory=lambda: _env_bool("ZANE_MEMORY_DEFRAG_ENABLED", False)
+    )
+    memory_defrag_interval_s: float = field(
+        default_factory=lambda: _env_float("ZANE_MEMORY_DEFRAG_INTERVAL_S", 300.0)
+    )
+    memory_defrag_similarity_threshold: float = field(
+        default_factory=lambda: _env_float("ZANE_MEMORY_DEFRAG_SIMILARITY_THRESHOLD", 0.90)
+    )
+    memory_defrag_half_life_hours: float = field(
+        default_factory=lambda: _env_float("ZANE_MEMORY_DEFRAG_HALF_LIFE_HOURS", 168.0)
+    )
+
+    # --- Physical hardware integration (zane/hardware/) ---
+    # Master switch. Defaults OFF: none of this hardware exists in this
+    # project's actual Render/Docker deployment, and even when enabled
+    # every sub-module still runs against MockHAL (a terminal log) unless
+    # ZANE_HARDWARE_USE_REAL_GPIO is also set — see zane/hardware/hal.py.
+    hardware_enabled: bool = field(
+        default_factory=lambda: _env_bool("ZANE_HARDWARE_ENABLED", False)
+    )
+    hardware_use_real_gpio: bool = field(
+        default_factory=lambda: _env_bool("ZANE_HARDWARE_USE_REAL_GPIO", False)
+    )
+
+    # Vision
+    hardware_camera_index: int = field(
+        default_factory=lambda: _env_int("ZANE_HARDWARE_CAMERA_INDEX", 0)
+    )
+    hardware_vision_interval_s: float = field(
+        default_factory=lambda: _env_float("ZANE_HARDWARE_VISION_INTERVAL_S", 1.0)
+    )
+
+    # Peripherals (cryo solenoid + NeoPixel ring)
+    hardware_cryo_relay_pin: int = field(
+        default_factory=lambda: _env_int("ZANE_HARDWARE_CRYO_RELAY_PIN", 17)
+    )
+    # Separate from hardware_enabled: the solenoid stays disarmed (tool
+    # calls refused) even with hardware fully enabled, unless explicitly
+    # armed — see the safety note in zane/hardware/peripheral_io.py.
+    hardware_cryo_armed: bool = field(
+        default_factory=lambda: _env_bool("ZANE_HARDWARE_CRYO_ARMED", False)
+    )
+    hardware_cryo_max_discharge_s: float = field(
+        default_factory=lambda: _env_float("ZANE_HARDWARE_CRYO_MAX_DISCHARGE_S", 2.0)
+    )
+    hardware_cryo_cooldown_s: float = field(
+        default_factory=lambda: _env_float("ZANE_HARDWARE_CRYO_COOLDOWN_S", 5.0)
+    )
+    hardware_neopixel_pin: int = field(
+        default_factory=lambda: _env_int("ZANE_HARDWARE_NEOPIXEL_PIN", 18)
+    )
+    hardware_neopixel_count: int = field(
+        default_factory=lambda: _env_int("ZANE_HARDWARE_NEOPIXEL_COUNT", 16)
+    )
+
+    # Acoustic localization (neck-tracking servo)
+    hardware_neck_servo_pin: int = field(
+        default_factory=lambda: _env_int("ZANE_HARDWARE_NECK_SERVO_PIN", 22)
+    )
+    hardware_doa_smoothing_alpha: float = field(
+        default_factory=lambda: _env_float("ZANE_HARDWARE_DOA_SMOOTHING_ALPHA", 0.3)
+    )
+
+    # Hardware state controller (Humor Switch override)
+    hardware_humor_gpio_pin: Optional[int] = field(
+        default_factory=lambda: _env_optional_int("ZANE_HARDWARE_HUMOR_GPIO_PIN")
+    )
+    hardware_override_socket_port: Optional[int] = field(
+        default_factory=lambda: _env_optional_int("ZANE_HARDWARE_OVERRIDE_SOCKET_PORT")
+    )
+
+    # --- Archival lore database (zane/knowledge_manager.py) ---
+    lore_index_path: str = field(
+        default_factory=lambda: os.getenv("ZANE_LORE_INDEX_PATH", "data/ninjago_lore.index")
+    )
+    lore_metadata_path: str = field(
+        default_factory=lambda: os.getenv("ZANE_LORE_METADATA_PATH", "data/ninjago_lore.json")
+    )
+    lore_retrieval_top_k: int = field(
+        default_factory=lambda: _env_int("ZANE_LORE_RETRIEVAL_TOP_K", 3)
+    )
+
+    # --- Wolfram|Alpha analytical math tool (zane/tools/wolfram_tool.py) ---
+    # Never hardcoded — the tool remains usable without this: it falls
+    # back to a local restricted-arithmetic evaluator (see the module's
+    # docstring for what that fallback can and can't resolve).
+    wolfram_app_id: Optional[str] = field(default_factory=lambda: os.getenv("WOLFRAM_APP_ID"))
+    wolfram_timeout_s: float = field(
+        default_factory=lambda: _env_float("WOLFRAM_TIMEOUT_S", 10.0)
+    )
+
+    # --- P.I.X.A.L. companion bridge (zane/companion_bridge.py) ---
+    # Dual-voice routing: P.I.X.A.L.'s anomaly notices are synthesized on
+    # this voice, distinct from ZANE_VOICE_ID, via the same
+    # AsyncElevenLabsClient (see synthesize_with_fallback's `voice_id`
+    # override) rather than a second TTS client. Never hardcode this —
+    # env-only, like every other voice ID in this project.
+    pixal_voice_id: Optional[str] = field(default_factory=lambda: os.getenv("PIXAL_VOICE_ID"))
+    pixal_battery_voltage_threshold_v: float = field(
+        default_factory=lambda: _env_float("ZANE_PIXAL_BATTERY_VOLTAGE_THRESHOLD_V", 10.5)
     )
 
     def validate_for_groq(self) -> None:

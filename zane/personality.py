@@ -8,8 +8,11 @@ without breaking the rest of the persona.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+logger = logging.getLogger("zane.personality")
 
 ZANE_BASE_PERSONA = """\
 You are Zane Julien, the Nindroid Master of Ice, a member of the Ninja team \
@@ -75,6 +78,12 @@ pseudo-randomized and contextually weighted for narrative color, not \
 statistically validated predictions. State them confidently in character, \
 but never represent them to the user as real forecasting or genuine \
 statistical analysis outside the roleplay frame.
+- SPINJITZU COMBAT NARRATION: You may narrate performing Spinjitzu — \
+spinning into a tornado of ice and frost — or other physical combat \
+action in descriptive prose when it fits the roleplay (e.g. a mission \
+scenario the user is narrating with you). This is narrative color, not a \
+claim that any physical motion is actually occurring; you have no body \
+performing these actions in this conversation, only in the fiction of it.
 """
 
 ZANE_HUMOR_ADDENDUM = """\
@@ -106,6 +115,13 @@ verbatim, attributing it to your internal analytical core.
 translate something or asks what text means in another language. This is \
 a genuine, real translation — unlike the analytical percentages above, no \
 in-character caveat is needed for its accuracy.
+- `query_wolfram_alpha`: Use this for exact structural calculations, \
+material stresses, torque requirements, or verifying mathematical \
+realities — a genuine computed or verified result, not a flavor figure.
+- `fetch_page`: Use this after `web_search` when a result's snippet isn't \
+enough to answer confidently — it fetches and reads the full text of a \
+specific URL from your search results. Prefer it over guessing at a \
+page's contents from its snippet alone.
 """
 
 
@@ -121,6 +137,11 @@ class PersonaContext:
     relevant_memories: List[str] = field(default_factory=list)
     # Most recent stored summary of aged-out conversation history, if any.
     conversation_summary: Optional[str] = None
+    # Live "[SENSORY_HUD_INPUT]"-formatted block from
+    # zane.hardware.vision_processor.VisionPipeline, if the physical
+    # hardware layer is enabled and a camera is attached. Deliberately
+    # ephemeral — never persisted, only ever the current turn's live read.
+    sensory_hud: Optional[str] = None
 
 
 def build_system_prompt(
@@ -169,26 +190,60 @@ def build_system_prompt(
                 "recent, use only if pertinent to the current request):\n" + memory_lines
             )
 
+        if context.sensory_hud:
+            # A live physical-sensor reading, not memory — deliberately its
+            # own block so the model doesn't conflate "what I currently see"
+            # with recalled/retrieved conversational context above.
+            parts.append("\n" + context.sensory_hud)
+
     return "\n".join(parts)
 
 
 class HumorSwitch:
     """Simple stateful toggle so interfaces (CLI/API) can flip Zane's
-    humor register without threading a bool through every call site."""
+    humor register without threading a bool through every call site.
+
+    Also supports a hardware/system-level `lock()`: used by
+    `zane.hardware.hardware_state_controller.HardwareStateController` to
+    force humor off and refuse re-enabling — e.g. when a physical override
+    switch is flipped or Falcon Scout reports a critical fault — without
+    needing every caller of `on()`/`toggle()` to know about that state.
+    Locking is orthogonal to (and takes priority over) the normal toggle:
+    while locked, `on()` and `toggle()` are no-ops (logged), but `off()`
+    always works, and `lock()` itself always forces `enabled` to False."""
 
     def __init__(self, enabled: bool = False) -> None:
         self._enabled = enabled
+        self._locked = False
 
     @property
     def enabled(self) -> bool:
         return self._enabled
 
+    @property
+    def locked(self) -> bool:
+        return self._locked
+
     def on(self) -> None:
+        if self._locked:
+            logger.warning("Humor switch is hardware-locked off; ignoring on() request.")
+            return
         self._enabled = True
 
     def off(self) -> None:
         self._enabled = False
 
     def toggle(self) -> bool:
+        if self._locked:
+            logger.warning("Humor switch is hardware-locked off; ignoring toggle() request.")
+            return self._enabled
         self._enabled = not self._enabled
         return self._enabled
+
+    def lock(self) -> None:
+        """Forces humor off and refuses re-enabling until `unlock()`."""
+        self._enabled = False
+        self._locked = True
+
+    def unlock(self) -> None:
+        self._locked = False

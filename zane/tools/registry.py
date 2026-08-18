@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from zane.analytics_bridge import AnalyticsEngine, ProbabilityFactors
 from zane.groq_client import AsyncGroqClient
+from zane.hardware.peripheral_io import CRYO_DISCHARGE_TOOL_SCHEMA, PeripheralManager
+from zane.tools.fetch_page import FETCH_PAGE_TOOL_SCHEMA, PageFetcher, fetch_page
 from zane.tools.translate import TRANSLATE_TOOL_SCHEMA, translate_text
 from zane.tools.web_search import WEB_SEARCH_TOOL_SCHEMA, WebSearchTool
+from zane.tools.wolfram_tool import WOLFRAM_TOOL_SCHEMA, WolframAlphaClient, query_wolfram_alpha
 
 logger = logging.getLogger("zane.tools.registry")
 
@@ -66,14 +69,41 @@ class ToolRegistry:
     executing a tool_call the model returned)."""
 
     def __init__(
-        self, analytics: AnalyticsEngine, web_search: WebSearchTool, groq_client: AsyncGroqClient
+        self,
+        analytics: AnalyticsEngine,
+        web_search: WebSearchTool,
+        groq_client: AsyncGroqClient,
+        peripheral_manager: Optional[PeripheralManager] = None,
+        wolfram_client: Optional[WolframAlphaClient] = None,
+        page_fetcher: Optional[PageFetcher] = None,
     ) -> None:
         self._analytics = analytics
         self._web_search = web_search
         self._groq_client = groq_client
+        # None unless ZANE_HARDWARE_ENABLED — see zane/core.py's
+        # SharedBackend.build(). A session with no PeripheralManager never
+        # advertises engage_cryo_discharge as a tool at all.
+        self._peripheral_manager = peripheral_manager
+        # Always present (see SharedBackend.build()) — the tool stays
+        # advertised/usable even without WOLFRAM_APP_ID configured, since
+        # it degrades to a local fallback rather than being unavailable.
+        self._wolfram_client = wolfram_client
+        # Always present too — fetch_page works with no configuration at
+        # all (it's a plain HTTP fetch, not a third-party API), so there's
+        # no "unconfigured" state to gate it behind.
+        self._page_fetcher = page_fetcher
 
     def schemas(self) -> List[Dict[str, Any]]:
-        return [WEB_SEARCH_TOOL_SCHEMA, CALCULATE_PROBABILITY_TOOL_SCHEMA, TRANSLATE_TOOL_SCHEMA]
+        schemas = [
+            WEB_SEARCH_TOOL_SCHEMA,
+            CALCULATE_PROBABILITY_TOOL_SCHEMA,
+            TRANSLATE_TOOL_SCHEMA,
+            WOLFRAM_TOOL_SCHEMA,
+            FETCH_PAGE_TOOL_SCHEMA,
+        ]
+        if self._peripheral_manager is not None:
+            schemas.append(CRYO_DISCHARGE_TOOL_SCHEMA)
+        return schemas
 
     async def dispatch(self, name: str, arguments_json: str) -> str:
         """Executes a single tool call and returns its string result, ready
@@ -111,6 +141,20 @@ class ToolRegistry:
                 text = args["text"]
                 target_language = args["target_language"]
                 return await translate_text(text, target_language, self._groq_client)
+
+            if name == "engage_cryo_discharge":
+                if self._peripheral_manager is None:
+                    return "TOOL_ERROR: engage_cryo_discharge is not available in this session."
+                duration_seconds = float(args.get("duration_seconds", 0.0))
+                return await self._peripheral_manager.engage_cryo_discharge(duration_seconds)
+
+            if name == "query_wolfram_alpha":
+                return await query_wolfram_alpha(args["query"], self._wolfram_client)
+
+            if name == "fetch_page":
+                if self._page_fetcher is not None:
+                    return await self._page_fetcher.fetch(args["url"])
+                return await fetch_page(args["url"])  # ephemeral client, still works
 
             return f"TOOL_ERROR: unknown tool '{name}'"
         except Exception as exc:  # noqa: BLE001 - tool failures must not crash the chat loop

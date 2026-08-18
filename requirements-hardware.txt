@@ -1,0 +1,30 @@
+# Physical hardware integration (zane/hardware/) — Raspberry Pi / real
+# GPIO deployments ONLY. Do NOT install this in the Render/Docker/cloud
+# deployment described in README.md: none of these libraries are needed
+# there (zane/hardware/hal.py's MockHAL runs the whole stack as a
+# terminal log with zero dependencies), and several of them either fail
+# to build or are simply meaningless off real Raspberry Pi hardware
+# (rpi_ws281x talks to Broadcom SoC registers directly; gpiozero needs an
+# actual GPIO chip to do anything).
+#
+# This file is not referenced by requirements.txt, requirements-core.txt,
+# the Dockerfile, or render.yaml, and is not installed by CI. It exists
+# purely as a reference for an operator setting up real hardware.
+#
+# Camera/face-detection (zane/hardware/vision_processor.py). Pin below
+# <5.0: as of writing, opencv-python(-headless) 5.0.0 stopped bundling
+# the Haar cascade data files under cv2.data.haarcascades that
+# vision_processor.py relies on (verified empirically while building
+# this module) — 4.x still ships them.
+opencv-python-headless>=4.8,<5.0
+
+# GPIO (zane/hardware/hal.py's GPIOHAL), all peripherals, and the neck
+# servo. gpiozero itself abstracts the underlying RPi.GPIO/lgpio/pigpio
+# backend for you.
+gpiozero>=2.0
+
+# WS2812B NeoPixel ring (zane/hardware/peripheral_io.py). Requires
+# running as root (or with appropriate permissions) on a real Pi to
+# access the PWM/DMA hardware rpi_ws281x needs.
+adafruit-circuitpython-neopixel>=6.3
+rpi_ws281x>=5.0

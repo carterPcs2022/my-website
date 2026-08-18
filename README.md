@@ -1,5 +1,7 @@
 # Zane — Digital Mind
 
+[![Tests](https://github.com/carterPcs2022/my-website/actions/workflows/tests.yml/badge.svg)](https://github.com/carterPcs2022/my-website/actions/workflows/tests.yml)
+
 A hybrid C++/Python cognitive architecture for **Zane**: ultra-fast LLM
 responses via **Groq**, a live web-search pipeline for "infinite
 information," and a thread-safe C++ engine for his analytical/probability
@@ -26,16 +28,31 @@ zane/                     High-level AI layer (Python)
     vector_index.py                FAISS semantic-search index
     summarizer.py                  LLM-driven summarization of aged-out history
     persistent.py                  PersistentMemory: ties the above together
+    memory_defragmenter.py         RAG conflict detection + resolution (opt-in)
+  knowledge_manager.py            Multi-namespace RAG: chat memory + static archival lore
   tools/
-    web_search.py                Tavily/DuckDuckGo search tool
+    web_search.py                Tavily/SerpAPI/Serper/DuckDuckGo search tool
+    fetch_page.py                  Full-page reader tool (SSRF-guarded)
     translate.py                  LLM-backed translation tool
+    wolfram_tool.py                Wolfram|Alpha analytical math tool + safe local fallback
     registry.py                   LLM function-calling schema + dispatch
   voice/
     tts.py                        Async ElevenLabs client + fallback helper
     switch.py                     Per-session voice on/off toggle
     playback.py                    CLI local audio playback (best-effort)
   core.py                        ZaneMind: the orchestrator
-  control.py                     ZaneSensorInput / ZaneControlOutput seam (unimplemented)
+  companion_bridge.py            P.I.X.A.L. companion agent + NeuralBridge anomaly injection
+  control.py                     ZaneSensorInput / ZaneControlOutput seam + vehicle telemetry connector
+  amphibious_bounty.py           Season 14 Amphibious Bounty: flight/surface/submerged autopilot
+  shuricopter_flight.py           ShuriCopter automated flight controller (12x scale of set 70673)
+  thermal_monitor.py             Ice Protocol: real host thermal safety governor
+  falcon_worker.py                Falcon Scout: system health daemon -> self-recall memory
+  hardware/                      Physical robot integration (opt-in, see "Physical hardware")
+    hal.py                        HardwareAbstractionLayer: MockHAL (default) / GPIOHAL (real, untested)
+    vision_processor.py            Camera + face detection -> "[SENSORY_HUD_INPUT]" context block
+    peripheral_io.py               Cryo-discharge solenoid (LLM tool) + NeoPixel status ring
+    sensory_localization.py        Acoustic DoA -> neck-servo tracking
+    hardware_state_controller.py   GPIO/socket-triggered Humor Switch override
   interfaces/
     base.py                      ZaneInterface abstract base class
     cli.py                        CLI adapter
@@ -44,6 +61,8 @@ zane/                     High-level AI layer (Python)
 
 Dockerfile / render.yaml     Container deployment (see "Deploying to Render")
 requirements-core.txt        Light deps; requirements-memory.txt adds the heavy RAG stack
+requirements-hardware.txt    Raspberry Pi only — never installed by Docker/CI, see "Physical hardware"
+data/raw_lore.txt            Source text for the archival lore database (compile with knowledge_manager.py)
 ```
 
 ### Why C++ + Python?
@@ -120,6 +139,11 @@ never lets flavor read as a technical claim to the user:
   pseudo-randomized and contextually weighted for narrative color, not
   statistically validated predictions — and must never be represented to
   the user as genuine forecasting outside the roleplay frame.
+- **Spinjitzu Combat Narration** — Zane may narrate performing Spinjitzu
+  or other physical combat action in descriptive prose during a roleplay
+  scenario. This is narrative color, not a claim that any physical motion
+  is actually occurring — he has no body performing these actions in the
+  conversation itself, only in its fiction.
 
 The `translate_text` tool (`zane/tools/translate.py`) is the one exception
 called out explicitly in the prompt: it's a real LLM-backed translation,
@@ -194,16 +218,380 @@ its own `libsndfile`, no system package needed). Compressed formats like
 MP3 fall back to `audioread`, which needs `ffmpeg` on the host — not
 installed in this project's Docker image.
 
-### Future integration seam: `zane/control.py`
+### Vehicle telemetry / driving-sim connector: `zane/control.py`
 
-`ZaneSensorInput` and `ZaneControlOutput` in `zane/control.py` are typed,
-**unimplemented** abstract base classes — groundwork for a future
-driving-simulation or other actuated-system integration. Nothing in this
-codebase implements or wires them into `ZaneMind` yet; they exist purely
-so that future module has a clean seam to plug into without requiring any
-changes to the core orchestrator. `SensorReading` and `ControlCommand` are
-deliberately generic dataclasses (name/value/unit/timestamp + metadata)
-until a concrete driving-sim module defines its real fields.
+`ZaneSensorInput`/`ZaneControlOutput` started as unimplemented, generic
+scaffolding and are now `Generic` ABCs with a first concrete consumer: a
+Gymnasium/OpenAI-Gym-style telemetry bridge (`TelemetryLoop`,
+`VehicleTelemetryFrame`, `VehicleControlOutput`). Honest about what's real
+here: `ZaneAnalytics` has no pathfinding methods, and none were invented —
+the obstacle-avoidance vector math (`compute_avoidance_vector`) is
+deterministic, dependency-free pure Python (an artificial-potential-field,
+a standard robotics technique). What genuinely routes through the
+C++-bridged `zane_cpp` engine is the maneuver's confidence/risk score, via
+`AnalyticsEngine.calculate_success_probability` with a documented field
+mapping (`build_probability_factors`) — the same real computation Zane
+already uses for mission-style risk assessment. Any obstacle inside a
+configurable safety envelope, or too many consecutive tick failures,
+triggers `emergency_stop()` immediately, bypassing the normal decision
+math. `InMemoryVehicleSensor`/`InMemoryVehicleControlSink` are reference
+implementations a real sim integration replaces; nothing here is wired
+into `ZaneMind` — it's a standalone loop a driving-sim host would run.
+
+### Amphibious Bounty autopilot: `zane/amphibious_bounty.py`
+
+The Season 14 Amphibious Destiny's Bounty's dual-mode (flight/surface/
+submerged) transformation engine, built on the same `Generic`
+`ZaneSensorInput`/`ZaneControlOutput` seam as `control.py` above (its own
+`InMemoryAmphibiousSensor`/`InMemoryAmphibiousControlSink` reference
+implementations register `AmphibiousTelemetry`/`AmphibiousControlOutput`
+into that pipeline) — and, like `control.py`'s own `TelemetryLoop`, not
+wired into `SharedBackend`/`ZaneMind.respond()`, since there's no live
+amphibious simulator feeding this project's actual chat deployment.
+`AmphibiousAutopilot.process_control_step()` routes to one of three
+regimes: FLIGHT runs classic multi-rotor vertical leveling with a hard
+25° pitch/roll safeguard; SUBMERGED runs proportional ballast control
+(`ballast_pump_engagement`, -1.0 blow/1.0 flood) and *entirely* disables
+the flight fields (they stay at their dataclass `None` default, not just
+a comment saying so); SURFACE is neutral station-keeping. A hard-coded
+critical depth alarm — 150.0m, the vehicle's real maximum structural
+depth — overrides whatever the ballast control loop would have commanded
+and fires a genuine emergency-surface-blow relay through the same
+`HardwareAbstractionLayer` every other physical actuator in this project
+uses (`hal.digital_write`), with the same guaranteed `finally`-block
+relay shutoff `peripheral_io.py`'s cryo-discharge tool uses — a mid-blow
+exception can never leave the relay energized. Defaults to `MockHAL` if
+no HAL is supplied, so this logs safely in this project's actual cloud
+deployment and in tests without ever touching real hardware. One
+deliberate, documented deviation from the literal spec: the spec's
+`process_control_step` was written to return `Any`; this returns the
+concrete `AmphibiousControlOutput` dataclass instead, since strict
+type-hinting is a standing project requirement that outranks a
+placeholder return type.
+
+### ShuriCopter flight controller: `zane/shuricopter_flight.py`
+
+A 12x real-world scale of the LEGO 70673 technical assembly, same
+standalone seam as the modules above (`InMemoryShuriCopterSensor`/
+`InMemoryShuriCopterControlSink`). `ShuriCopterAutopilot.process_flight_step()`
+runs linear altitude tracking against `ground_clearance_m` (the only
+altitude-like signal the telemetry schema provides) with a +15% ground-
+effect thrust multiplier below 2m clearance, a hard 25°pitch/20°roll tilt
+safeguard that force-clamps the cyclic vectors to prevent a frame flip,
+and yaw-rate damping via a genuinely circular-aware delta calculation
+(`_circular_delta_deg`) — the same 359°/1° wraparound fix
+`hardware/sensory_localization.py` already uses for acoustic
+direction-of-arrival smoothing, reused here so a naive linear
+current-minus-previous calculation doesn't read a true +2° heading change
+as a -358° swing and slam the tail rotor to its clamp. `ice_blaster_armed`
+reflects external target-acquisition/override state (set via
+`set_target_acquired`/`set_external_override`, since the spec's
+`process_flight_step(self, telemetry)` signature leaves no room for
+per-call arguments) and, on the rising edge, relays an actual discharge
+request to `PeripheralManager.engage_cryo_discharge` — which keeps its
+own hard arm/duration/cooldown gate as the real safety boundary; this
+controller's judgment about *when* to ask is never trusted as that
+boundary, exactly as an LLM's tool call isn't.
+
+### P.I.X.A.L. companion bridge: `zane/companion_bridge.py`
+
+P.I.X.A.L. runs as her own independent agent persona — her own dynamic
+system prompt (`build_pixal_system_prompt`) — rather than a second Groq
+connection: `PixalSystemsCore` reuses Zane's existing `AsyncGroqClient`
+(its retry/backoff/auth plumbing would just be duplicated for no
+behavioral benefit), and her `analyze_vehicle_telemetry(metrics)` method
+is deterministic threshold-rule detection, not an LLM call — the same
+reasoning `falcon_worker.py` uses for its own detection: she has to keep
+monitoring even if Groq itself is the thing having problems. Breaches
+(API latency from Falcon Scout, battery voltage or depth from the vehicle
+autopilots above) become `VehicleAnomaly` records flagged onto a
+`NeuralBridge`, a bounded async queue with a drop-oldest-on-overflow
+policy. Every turn, `ZaneMind.respond()` calls
+`neural_bridge.inject_into_prompt()` right before building the final
+system prompt, which drains anything pending and appends it as an exact
+`[COMPANION_SYS_NOTICE]: P.I.X.A.L. reports...`-tagged block — so Zane
+sees her findings and can relay them, but they're never written into
+memory as if Zane said them himself. `NeuralBridge` is deliberately
+deadlock-resistant: its `threading.Lock` only ever guards a single
+attribute read/write, never an await, and cross-thread flagging
+(`flag_anomaly_threadsafe`, for a caller running on a background thread
+rather than the event loop) goes through
+`asyncio.run_coroutine_threadsafe` rather than blocking.
+
+**Dual voice**: when a notice was pending this turn, `ZaneMind.respond()`
+synthesizes it concurrently with Zane's own response via `asyncio.gather`
+— her audio never blocks or delays his. Rather than standing up a second
+`AsyncElevenLabsClient`, `synthesize_with_fallback` gained an optional
+`voice_id` override parameter, so her notices reuse Zane's exact same
+client/retry/backoff machinery, just routed to `PIXAL_VOICE_ID` instead of
+`ZANE_VOICE_ID`. `TurnResult.companion_audio`/`companion_audio_format`
+are `None` whenever there's nothing pending, `PIXAL_VOICE_ID` isn't
+configured, or voice is off — identical fallback shape to Zane's own
+`audio` field.
+
+### Ice Protocol: `zane/thermal_monitor.py`
+
+A real host thermal safety governor — a background `threading.Thread`
+polls `psutil.sensors_temperatures()`, and crossing the configured
+threshold (default 75°C, with a hysteresis band to avoid flapping) sets
+`ice_protocol_active`, which `ZaneMind.respond()` checks *before* touching
+memory or Groq at all, short-circuiting to a local rules-based responder
+when active. **Read the caveat in the module docstring before enabling
+this**: `psutil` only reports real sensor data on Linux hosts with exposed
+`hwmon` sensors and never reports GPU temperature on its own — in
+virtually all containers and VMs, including this project's own
+Render/Docker deployment target, no sensors are visible to the guest at
+all, so the protocol simply never trips. This module never fabricates a
+reading to compensate; it's built for bare-metal/local/robotics
+deployments where `psutil` genuinely has sensor access, which is why
+`ZANE_ICE_PROTOCOL_ENABLED` defaults to `false`.
+
+### Falcon Scout: `zane/falcon_worker.py`
+
+A background async daemon (default every 60s) that profiles the running
+process — API request latency (via FastAPI middleware feeding
+`LatencyRecorder`), SQLite responsiveness (`SQLiteMessageStore.ping()`),
+and any `ERROR`+ log records captured since the last cycle
+(`InMemoryLogCapture`) — and, only when something is actually wrong,
+writes a technical summary directly into the shared RAG memory pipeline
+tagged `role="falcon_scout_telemetry"`. Deliberately does **not** call the
+LLM to write the summary (plain deterministic string formatting): Falcon
+Scout needs to keep working even if Groq itself is what's having
+problems. Because semantic retrieval already searches across every
+session rather than just the current one (see "Memory" above), these
+entries surface for organic recall — "how's your operational stability
+been?" — with no retrieval-path changes needed. Pure observability with
+no effect on response behavior, so `ZANE_FALCON_SCOUT_ENABLED` defaults
+to `true`.
+
+### Memory Defragmenter: `zane/memory/memory_defragmenter.py`
+
+Detects and resolves factual conflicts between stored memories — e.g. two
+contradictory records of "the vault code." Two-stage by design: cosine
+similarity is used only as a *candidate filter* (entries about the same
+subject — it measures topical relatedness, not truth-value agreement),
+and the actual contradiction judgment is delegated to an LLM call
+mirroring `zane/memory/summarizer.py`'s existing pattern. **Nothing is
+ever pruned without an explicit LLM-confirmed conflict** — an ambiguous,
+unparsable, or unavailable judgment always means "do nothing this cycle."
+When a conflict is confirmed, an exponential half-life recency weight
+(`_recency_weight`) picks which entry is authoritative, the older one is
+pruned from both SQLite and the FAISS index, and a new consolidated-truth
+entry is written (`role="memory_defrag_consolidated"`). Because this
+autonomously deletes data (however conservatively gated),
+`ZANE_MEMORY_DEFRAG_ENABLED` defaults to `false` — an intentionally higher
+bar to opt into than Falcon Scout's pure observability.
+
+### Archival lore database: `zane/knowledge_manager.py`
+
+A second, physically separate RAG namespace alongside organic chat
+memory — a static, immutable "Ninjago Lore Database" that never mixes
+with (or gets diluted/polluted by) live conversation history.
+`KnowledgeManager` is a *conceptual* singleton: `SharedBackend.build()`
+constructs exactly one instance per process and every session shares it,
+the same pattern already used for `AnalyticsEngine`/`EmbeddingBackend`/
+etc. — not a language-level singleton (`__new__` override / module
+global), which would fight this codebase's dependency-injection-based
+testing conventions (every test here constructs fresh instances against
+fakes; a hard singleton would make that impossible).
+
+Isolation is physical, not just logical: `ninjago_lore` is backed by its
+own `FaissVectorIndex` bound to `data/ninjago_lore.index` (and a JSON
+metadata sidecar, `data/ninjago_lore.json` — read-only at request time;
+only `compile_lore_database` ever writes to it), entirely separate from
+the chat-memory `FaissVectorIndex` `PersistentMemory` already uses. Lore
+vectors are never added to the chat index or vice versa, so an
+`[ARCHIVAL_LORE_DATABASE]`-tagged hit can never be confused with an
+`[HISTORICAL_CONTEXT]`-tagged one.
+
+`query_all_knowledge_sources(query_text, user_memory, top_k)` embeds the
+query exactly once and searches both namespaces concurrently
+(`asyncio.gather`), reusing that single vector for both — including
+inside `PersistentMemory.retrieve_relevant`, which gained an optional
+`query_vector` parameter specifically so it doesn't need to re-embed
+identical text a caller already embedded. This is what `ZaneMind.respond()`
+now calls instead of `PersistentMemory.retrieve_relevant` directly,
+feeding the combined, tagged result straight into the same
+`PersonaContext.relevant_memories` block used before — no new,
+overlapping context-injection mechanism.
+
+`compile_lore_database(source_text_file)` is the offline build step:
+deterministic paragraph-aware chunking (same input always produces the
+same chunks — greedily packs whole paragraphs up to a size limit, falling
+back to fixed-size overlapping windows only for a single paragraph that
+alone exceeds it), local embedding, and a from-scratch FAISS index +
+JSON metadata write. It's a CLI script too:
+
+```bash
+python -m zane.knowledge_manager data/raw_lore.txt
+```
+
+`data/raw_lore.txt` (committed) is real source lore content — Destiny's
+Bounty (including its treaded "Land Bounty" land-traversal configuration),
+Zane's own background, Spinjitzu, Sensei Wu, the four Golden Weapons, the
+rest of the team's roster (Kai, Jay, Cole, Lloyd, Nya), and Zane's
+Titanium Ninja rebuild — the compiled `.index`/`.json` are gitignored
+build artifacts, like `zane_cpp.so`; run the command above locally to
+generate them (requires network access the first time, to download the
+sentence-transformers model — unavailable in this project's own sandbox,
+where the chunking/indexing mechanics were instead verified end-to-end
+against a deterministic fake embedding backend, and the real embedding
+model failing without network access was confirmed to fail loudly with a
+clear error, by design, rather than silently produce an empty database).
+
+### Wolfram|Alpha analytical math tool: `zane/tools/wolfram_tool.py`
+
+An explicit LLM tool for objective, computed answers — "exact structural
+calculations, material stresses, torque requirements, or verifying
+mathematical realities" — rather than relying on an LLM's own arithmetic,
+which is unreliable for exactly this class of query.
+
+Two corrections from the original spec worth noting: the real Wolfram
+host is `www.wolframalpha.com` over **HTTPS** (`http://wolframalpha.com`
+would send the API key in plaintext, and isn't the right host regardless);
+and of Wolfram's API products, this uses the **LLM API**
+(`/api/v1/llm-api`) specifically, since it's what Wolfram built for this
+exact tool-calling use case and returns plain text directly — the "Full
+Results API" returns structured XML/JSON "pods" that would need real
+parsing logic to turn into clean text, not worth that complexity without
+a live key to verify the actual response shape against.
+
+On any failure — no `WOLFRAM_APP_ID` configured, a network error, a
+non-200 or empty response — `query_wolfram_alpha` logs the mandated
+`"[SYSTEM LOG]: Wolfram engine unavailable. Commencing local fallback
+calculation."` notice and falls back to `safe_local_eval`: a restricted,
+`ast`-based arithmetic evaluator (numeric literals, `+ - * / ** % //`,
+parentheses, and a small whitelist of `math` functions/constants) —
+**never Python's real `eval()`** on the LLM-supplied query text (verified
+this matters: a literal code-injection attempt like
+`__import__("os").system(...)` is safely rejected, returning `None`
+rather than executing). This handles a genuine, meaningful subset of
+"verifying mathematical realities" — literal expressions — but is
+explicitly not a natural-language physics/materials solver: an NL query
+Wolfram can't be reached for gets an honest "cannot verify this without
+Wolfram" response, never a fabricated plausible-sounding number, since
+that would reintroduce the exact failure mode this tool exists to avoid.
+Unlike `engage_cryo_discharge`, this tool is always advertised/available
+(`WOLFRAM_APP_ID` unset just means it always uses the local fallback),
+since it degrades to something genuinely useful rather than needing a
+hardware safety gate.
+
+### Reading full pages: `zane/tools/fetch_page.py`
+
+`web_search` only ever returns titled snippets, so Zane could easily
+"answer" from a two-line summary that doesn't actually support the claim.
+`fetch_page` closes that gap: given a URL (typically one from a prior
+`web_search` result), it fetches the page and extracts its readable text
+via a small, dependency-free HTML-to-text parser built on the stdlib
+`html.parser.HTMLParser` — deliberately not a new `beautifulsoup4`
+dependency for something this scoped, consistent with the project's bias
+toward minimal deps. Content is capped (6000 chars by default,
+`FETCH_PAGE_MAX_CHARS`) and clearly marked `[Content truncated.]` when
+cut, so a long article never blows the context budget silently.
+
+**Security note (SSRF):** a fetch tool the LLM can call with an arbitrary
+URL is a textbook Server-Side Request Forgery vector — a crafted or
+attacker-surfaced URL could otherwise reach `http://169.254.169.254/`
+(the cloud metadata endpoint on AWS/GCP/Azure), `localhost`, or an
+internal admin panel. `_is_safe_url` resolves the hostname and rejects
+anything that isn't a public IP address *before* connecting, and —
+because an httpx client configured to auto-follow redirects would let a
+malicious server 302 straight past that check — `_fetch_with_redirect_guard`
+re-runs the same validation on every redirect hop rather than trusting
+`follow_redirects=True`. This is an accepted, documented partial defense
+(it doesn't close a DNS-rebinding race between the check and the actual
+connect), the same kind of honestly-scoped caveat this project applies
+elsewhere (e.g. `thermal_monitor.py`'s sensor-access platform notes).
+Always advertised/available, like the Wolfram tool — no configuration is
+required for it to work at all.
+
+### Search backends: Tavily, SerpAPI, Serper, DuckDuckGo — `zane/tools/web_search.py`
+
+`web_search`'s "auto" backend selection is now a four-tier cascade:
+**Tavily** (if `TAVILY_API_KEY` is set — purpose-built for LLM
+tool-calling) > **SerpAPI** (if `SERPAPI_API_KEY` is set — real-time
+Google search results) > **Serper** (if `SERPER_API_KEY` is set — a
+different, cheaper real-time Google search results provider) >
+**DuckDuckGo** (always available, no key needed), added because a live
+key for one backend shouldn't mean total search failure if that backend
+has an outage — each tier falls through to the next on any exception
+rather than raising. Both SerpAPI and Serper reuse the project's existing
+`httpx` dependency (already pulled in for ElevenLabs/Wolfram) rather than
+adding dedicated SDKs, and each backend's HTTP client is created lazily
+on first use — a session with only a Tavily key configured never opens
+an unused HTTP client for a backend it will never call. As always,
+`SERPAPI_API_KEY`/`SERPER_API_KEY` are env-only, never hardcoded.
+
+### Physical hardware: `zane/hardware/`
+
+The final integration layer, bridging the LLM/C++ core to real robotic
+I/O — off by default (`ZANE_HARDWARE_ENABLED=false`), since none of this
+hardware exists in the Render/Docker deployment. Every module takes a
+`HardwareAbstractionLayer` (`zane/hardware/hal.py`) via dependency
+injection: `MockHAL` (zero dependencies, logs every operation in Zane's
+terminal voice) is what actually runs by default and in every test in
+this repo; `GPIOHAL` (real `gpiozero` + NeoPixel hardware, opted into
+separately via `ZANE_HARDWARE_USE_REAL_GPIO`) is **untested** — there is
+no physical GPIO chip anywhere this project runs, sandbox or Render
+alike, so treat it as unverified until run on an actual Raspberry Pi.
+
+**A deliberate deviation from a literal reading of the spec, worth being
+explicit about**: `engage_cryo_discharge` drives a solenoid on a real 12V
+CO2 valve — a genuine pressurized-gas actuator — and is reachable from the
+LLM's own tool-calling loop. An LLM's judgment is not trusted as the sole
+safety boundary for that. `PeripheralManager`
+(`zane/hardware/peripheral_io.py`) starts **disarmed**
+(`ZANE_HARDWARE_CRYO_ARMED=false`) regardless of `ZANE_HARDWARE_ENABLED` —
+nothing the model says can fire the solenoid until something outside its
+control arms it; every requested duration is clamped to a hard maximum
+regardless of what's asked for; a cooldown window rejects rapid re-fire;
+and the relay is switched off in a `finally` block so a mid-discharge
+exception or cancellation can never leave it energized.
+
+- **Vision** (`vision_processor.py`) — a real (not stubbed-out)
+  `cv2.CascadeClassifier` Haar-cascade face detector, using the classifier
+  XML bundled inside `opencv-python-headless` itself
+  (`cv2.data.haarcascades`) — no model download required. `distance_meters`
+  is a genuine monocular pinhole-camera estimate (known face width x focal
+  length / apparent pixel width), honestly caveated as approximate, not
+  LIDAR-grade. Formats a `"[SENSORY_HUD_INPUT]: Target array updated..."`
+  block injected into the system prompt as its own distinct block (see
+  `PersonaContext.sensory_hud` in `personality.py`) — **deliberately
+  ephemeral**: never written to the persistent RAG store, so this does not
+  create a standing log of who has appeared in front of the camera.
+- **Peripherals** (`peripheral_io.py`) — the cryo solenoid (see safety note
+  above) plus a WS2812B NeoPixel ring reflecting Zane's operational mode
+  (`IDLE`/`THINKING`/`SPEAKING`/`ERROR`) via a real async animation loop
+  (pulsing ice-blue while thinking, solid blue while speaking, flashing
+  red on a Groq failure). This is a *system*-driven state transition
+  `ZaneMind.respond()` triggers directly, not an LLM tool — the model
+  doesn't decide when it's "thinking."
+- **Acoustic localization** (`sensory_localization.py`) — consumes
+  Direction-of-Arrival frames and smooths them with a circular-mean-aware
+  exponential moving average (unit-vector averaging + `atan2`, not a naive
+  linear EMA, which has a real, well-known jump artifact right at the
+  0°/360° wrap boundary — verified this matters: `smooth(359°, 1°)`
+  naively drifts toward 180° instead of ~0°). Drives
+  `HeadTrackingState.target_neck_angle` — a small, purpose-built holder,
+  **not** `control.py`'s vehicle-domain `ZaneControlOutput`/
+  `VehicleControlOutput` (an earlier spec named it that, but a "throttle"
+  field has no meaning for a neck servo — bolting the two together would
+  conflate unrelated actuator domains).
+- **Hardware state controller** (`hardware_state_controller.py`) — connects
+  the physical Humor Switch to `personality.HumorSwitch`'s new
+  `lock()`/`unlock()`, via two independent, real, testable trigger paths: a
+  GPIO interrupt callback (`HardwareAbstractionLayer.watch_digital_pin`,
+  fireable on `MockHAL` via `simulate_pin_change` — exactly what the tests
+  do) and a local asyncio socket server accepting
+  `HUMOR_SWITCH:OFF`/`HUMOR_SWITCH:ON`/`OVERRIDE:CLEAR` commands (the more
+  relevant path given this project's actual deployment has no GPIO pins at
+  all). Also subscribes to Falcon Scout's new `SystemFaultState` — a
+  critical fault (DB entirely down, or enough caught exceptions in one
+  cycle) engages the same override. Both triggers must clear before the
+  override lifts. One physical robot body has one humor state, not one
+  per chat session: when hardware is enabled, every `ZaneMind` session on
+  the process shares one `HumorSwitch` instance instead of each getting
+  its own private one.
 
 ## Setup
 
@@ -280,17 +668,105 @@ starts fresh each time the container restarts.
 pytest
 ```
 
+**Continuous integration** (`.github/workflows/tests.yml`) runs the full
+suite on every push to the default branch and every pull request, in two
+separate jobs — one with `zane_cpp` actually built (the same path
+production's Dockerfile takes), one with it deliberately left unbuilt so
+the pure-Python analytics fallback gets its own real verification rather
+than only ever being exercised incidentally. Both are first-class
+supported paths (see `zane/analytics_bridge.py`), so both get checked on
+every change instead of assuming whichever one happens to be built locally
+is representative.
+
 Tests exercise the personality prompt builder, the analytics engine (using
 whichever backend — native or pure-Python fallback — is available in the
 current environment), rolling memory trimming, tool dispatch, the
 persistent memory subsystem (SQLite write durability, FAISS retrieval
-ranking, summarization triggering, and pruning), and voice synthesis
-(success path, retry-then-succeed, non-retryable and retry-exhausted
-failure, and the toggle-on/off fallback behavior — all against an injected
-fake SDK client, no real ElevenLabs calls). The real sentence-transformers
-model requires downloading weights on first use; `tests/test_embeddings.py`
-skips its real-model assertions (rather than failing) in offline
-environments while still testing failure handling.
+ranking, summarization triggering, and pruning), voice synthesis (success
+path, retry-then-succeed, non-retryable and retry-exhausted failure, and
+the toggle-on/off fallback behavior — all against an injected fake SDK
+client, no real ElevenLabs calls), the vehicle telemetry connector
+(parsing/validation, avoidance-vector math, emergency-stop triggering on
+close obstacles and on repeated tick failures), the Ice Protocol
+(threshold/hysteresis transitions via a monkeypatched sensor reader, the
+low-power responder), Falcon Scout (latency/DB/exception detection against
+fake stores, graceful degradation on embedding failure), and the memory
+defragmenter (confirmed-conflict pruning, and — just as importantly — that
+a no-conflict, unparsable, or Groq-unavailable judgment never deletes
+anything), and the physical hardware layer — all against `MockHAL`, the
+only HAL implementation that's actually exercised anywhere in this repo:
+distance estimation and HUD formatting, cryo-discharge arming/clamping/
+cooldown/relay-shutoff, the NeoPixel animation loop, circular DoA
+smoothing (specifically the 359°/1° wraparound case a naive linear EMA
+gets wrong), and the hardware state controller's GPIO-callback and
+real-socket-connection override paths, including that both triggers must
+clear before the override lifts. The real cv2 Haar-cascade detection path
+and the opencv-python-headless version pin were validated manually
+against the actual library while building `vision_processor.py` (see its
+module docstring) rather than shipped as an automated test, since `cv2`
+is Raspberry-Pi/hardware-only and not a project dependency. `GPIOHAL`
+itself is untested — there is no physical GPIO chip anywhere this project
+runs. The real sentence-transformers model requires downloading weights
+on first use; `tests/test_embeddings.py` skips its real-model assertions
+(rather than failing) in offline environments while still testing failure
+handling.
+
+The archival lore pipeline (`tests/test_knowledge_manager.py`) is tested
+against real SQLite/FAISS/JSON I/O with a deterministic fake embedding
+backend (the same pattern as the persistent-memory tests, for the same
+offline-sandbox reason): deterministic paragraph-aware chunking (packing,
+oversized-paragraph splitting, empty input), `compile_lore_database`
+failure modes (missing/empty source file), an end-to-end compile of the
+real `data/raw_lore.txt` shipped in this repo, and — the important
+guarantee — namespace isolation: a test deliberately compiles lore content
+designed to score high against a chat-history query, then confirms the
+two never cross-contaminate because they live in physically separate
+FAISS indices, plus that `query_all_knowledge_sources` tags each hit
+correctly and runs both lookups concurrently off a single shared
+embedding call. The Wolfram tool (`tests/test_wolfram_tool.py`) tests
+`WolframAlphaClient` against a real `httpx.MockTransport` (success,
+non-200, empty response, network error, missing app ID) and the full
+`query_wolfram_alpha` fallback chain down to the local `ast`-based
+evaluator, including that it rejects real code-injection payloads and
+never fabricates an answer for a query it can't resolve.
+
+The two new vehicle autopilots (`tests/test_amphibious_bounty.py`,
+`tests/test_shuricopter_flight.py`) exercise all three Bounty regimes
+(including that SUBMERGED genuinely leaves the flight fields at `None`,
+not just claims to), the critical-depth alarm's real relay
+fire-and-guaranteed-shutoff against a spied `MockHAL`, the ballast sign
+convention (deeper-than-target must blow, not flood — an actual bug
+caught and fixed while writing these tests), the ShuriCopter's ground-
+effect multiplier, tilt-safeguard clamping, the circular yaw-wrap fix
+specifically at the 359°/1° boundary, and the ice-blaster's
+rising-edge-only trigger into a real `PeripheralManager`. Both modules'
+`Generic` `ZaneSensorInput`/`ZaneControlOutput` reference implementations
+are round-tripped the same way `control.py`'s own are. The companion
+bridge (`tests/test_companion_bridge.py`) tests `NeuralBridge`'s bounded
+drop-oldest queue, prompt injection with the exact
+`[COMPANION_SYS_NOTICE]:` tag, cross-thread anomaly flagging against a
+real `threading.Thread` (not just the async-native path), and
+`PixalSystemsCore`'s deterministic threshold detection across all three
+metric sources plus its honest-failure path on malformed input.
+
+`fetch_page` (`tests/test_fetch_page.py`) gets particular attention on the
+SSRF guard, since that's the part where a subtle bug is a real
+vulnerability rather than a wrong chat reply: it asserts
+`_resolves_to_public_address` correctly rejects loopback, private, and
+link-local IP literals (including `169.254.169.254`, the actual cloud
+metadata endpoint this guard exists to block) using real `socket.getaddrinfo`
+calls against IP literals — no DNS/network needed, since resolving an IP
+literal is a local parse, not a lookup — plus a monkeypatched-`gaierror`
+case for the DNS-failure path. It also proves the redirect guard actually
+matters: one test redirects to a disallowed address and confirms the
+fetch is refused, not silently followed. The HTTP/parsing layer
+(`httpx.MockTransport`) covers successful extraction, non-text content
+types, HTTP/network failures, empty-content pages, and truncation.
+`web_search`'s new backends (`tests/test_web_search.py`) test the full
+Tavily > SerpAPI > Serper > DuckDuckGo priority matrix and that a failing
+backend falls through to the next tier rather than the request failing
+outright, plus that each backend's httpx client is only ever opened
+lazily and closed cleanly.
 
 ## Extending to a new surface
 

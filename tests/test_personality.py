@@ -67,12 +67,18 @@ def test_flavor_guidance_always_present_regardless_of_toggles():
             assert "DIGITAL MIND BACKSTORY" in prompt
             assert "ADVANCED SCANNING" in prompt
             assert "FAST CALCULATIONS" in prompt
+            assert "SPINJITZU COMBAT NARRATION" in prompt
 
 
 def test_flavor_guidance_disclaims_scanning_and_probability_as_non_real():
     prompt = build_system_prompt()
     assert "No real biometric sensing or lie detection exists" in prompt
     assert "not statistically validated predictions" in prompt
+
+
+def test_flavor_guidance_disclaims_spinjitzu_as_narrative_not_physical():
+    prompt = build_system_prompt()
+    assert "no body performing these actions in this conversation" in prompt
 
 
 def test_humor_switch_toggle():
@@ -84,3 +90,43 @@ def test_humor_switch_toggle():
     assert switch.enabled is False
     switch.on()
     assert switch.enabled is True
+
+
+def test_humor_switch_lock_forces_off_and_blocks_re_enable():
+    switch = HumorSwitch(enabled=True)
+    switch.lock()
+    assert switch.locked is True
+    assert switch.enabled is False
+
+    switch.on()
+    assert switch.enabled is False  # refused while locked
+    assert switch.toggle() is False  # also refused
+
+
+def test_humor_switch_unlock_restores_normal_behavior():
+    switch = HumorSwitch(enabled=True)
+    switch.lock()
+    switch.unlock()
+    assert switch.locked is False
+    switch.on()
+    assert switch.enabled is True
+
+
+def test_humor_switch_off_always_works_even_while_locked():
+    switch = HumorSwitch(enabled=True)
+    switch.lock()
+    switch.off()  # off() is not gated by the lock
+    assert switch.enabled is False
+
+
+def test_sensory_hud_rendered_as_distinct_block():
+    ctx = PersonaContext(sensory_hud="[SENSORY_HUD_INPUT]: Target array updated (1 detected) — target_1(distance=1.20m, bbox=(0,0,10,10))")
+    prompt = build_system_prompt(context=ctx)
+    assert "[SENSORY_HUD_INPUT]" in prompt
+    assert "target_1" in prompt
+
+
+def test_no_sensory_hud_block_when_absent():
+    ctx = PersonaContext(addressed_by="Kai")
+    prompt = build_system_prompt(context=ctx)
+    assert "SENSORY_HUD_INPUT" not in prompt

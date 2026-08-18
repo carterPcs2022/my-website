@@ -161,21 +161,32 @@ class PersistentMemory:
         the original ConversationMemory-only design."""
         return self.rolling.get_messages()
 
-    async def retrieve_relevant(self, query: str, top_k: Optional[int] = None) -> List[str]:
+    async def retrieve_relevant(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        query_vector: Optional["np.ndarray"] = None,
+    ) -> List[str]:
         """Semantically retrieves up to `top_k` past messages relevant to
         `query`, excluding anything already present in the rolling window.
         Degrades to an empty list (never raises) on embedding or index
         failure, or on a cold-start empty history — the caller simply gets
-        no "relevant past context" block that turn."""
+        no "relevant past context" block that turn.
+
+        `query_vector` lets a caller that's already embedded the query
+        (e.g. `zane.knowledge_manager.KnowledgeManager`, which searches
+        this same query against a second namespace concurrently) pass it
+        straight through instead of paying to re-embed identical text."""
         k = top_k if top_k is not None else self.config.retrieval_top_k
         if k <= 0:
             return []
 
-        try:
-            query_vector = await asyncio.to_thread(self._embeddings.embed, query)
-        except EmbeddingError as exc:
-            logger.warning("Embedding failed for retrieval query; skipping RAG context: %s", exc)
-            return []
+        if query_vector is None:
+            try:
+                query_vector = await asyncio.to_thread(self._embeddings.embed, query)
+            except EmbeddingError as exc:
+                logger.warning("Embedding failed for retrieval query; skipping RAG context: %s", exc)
+                return []
 
         # Over-fetch so that filtering out rolling-window duplicates still
         # leaves up to `k` genuinely "older" results.
