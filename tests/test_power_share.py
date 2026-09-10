@@ -1,13 +1,13 @@
 from zane.power_share import (
     PowerShareDecision,
     PowerSharePolicy,
-    PowerShareTelemetry,
+    PowerTelemetry,
     ProtectedPowerShareCoordinator,
 )
 
 
 def telemetry(donor=80.0, recipient=10.0, donor_temp=30.0, recipient_temp=30.0, healthy=True):
-    return PowerShareTelemetry(donor, recipient, donor_temp, recipient_temp, healthy, healthy)
+    return PowerTelemetry(donor, recipient, donor_temp, recipient_temp, healthy, healthy)
 
 
 def test_allows_healthy_low_recipient() -> None:
