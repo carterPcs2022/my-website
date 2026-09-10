@@ -1,0 +1,30 @@
+name: ChatGPT Build ZIP
+
+on:
+  push:
+    branches:
+      - claude/zane-ninjago-hybrid-arch-741xhg
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: claude/zane-ninjago-hybrid-arch-741xhg
+
+      - name: Create repository ZIP
+        run: |
+          rm -rf .git
+          zip -qr ../my-website.zip . -x './.github/workflows/chatgpt-build-zip.yml'
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: my-website
+          path: ../my-website.zip
+          if-no-files-found: error
