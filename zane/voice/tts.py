@@ -1,19 +1,18 @@
 """Async ElevenLabs text-to-speech client.
 
-Follows the same exponential-backoff-with-jitter retry pattern as
-AsyncGroqClient (see zane/groq_client.py). Voice synthesis is an optional
-post-processing step on top of Zane's text response — every failure mode
-here degrades to "no audio" rather than raising into the conversation
-turn; see `synthesize_with_fallback` below, which is what `ZaneMind.respond`
-actually calls.
+Voice synthesis is optional post-processing: failures always degrade to
+text-only output. The client also supports a separate P.I.X.A.L. API key so
+Zane and P.I.X.A.L. can use independent ElevenLabs quotas/accounts without
+sharing credentials.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import time
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger("zane.voice.tts")
 
@@ -35,9 +34,7 @@ except ImportError:  # pragma: no cover
 
 
 class TextToSpeechError(RuntimeError):
-    """Raised when ElevenLabs synthesis fails after all retries are
-    exhausted. Callers must treat this as a soft failure — voice
-    synthesis must never break a conversational turn."""
+    """Raised when ElevenLabs synthesis fails after all retries."""
 
 
 class AsyncElevenLabsClient:
@@ -59,10 +56,10 @@ class AsyncElevenLabsClient:
                 "(set ZANE_VOICE_ID; do not hardcode it)."
             )
 
+        self._api_key = api_key
+        self._alternate_clients: Dict[str, Any] = {}
+
         if client is not None:
-            # Dependency injection seam for tests — a fake exposing the
-            # same `.text_to_speech.convert(...)` async-iterator interface
-            # can be passed here without needing the real SDK or network.
             self._client = client
         else:
             if not api_key:
@@ -71,8 +68,8 @@ class AsyncElevenLabsClient:
                 )
             if AsyncElevenLabs is None:
                 raise TextToSpeechError(
-                    "The `elevenlabs` package is not installed. Run `pip install "
-                    "elevenlabs` to enable voice synthesis."
+                    "The `elevenlabs` package is not installed. Run `pip install elevenlabs` "
+                    "to enable voice synthesis."
                 )
             self._client = AsyncElevenLabs(api_key=api_key)
 
@@ -82,6 +79,35 @@ class AsyncElevenLabsClient:
         self.max_retries = max_retries
         self.base_backoff_s = base_backoff_s
         self.max_backoff_s = max_backoff_s
+
+    def _client_for_voice(self, voice_id: str) -> Any:
+        """Return the client authorized for this voice.
+
+        Zane uses the primary client/key. P.I.X.A.L. uses PIXAL_API_KEY when
+        her configured voice ID is selected. The key is read only from the
+        environment and is never logged or returned to callers.
+        """
+        if voice_id == self.voice_id:
+            return self._client
+
+        pixal_voice_id = os.getenv("PIXAL_VOICE_ID")
+        pixal_api_key = os.getenv("PIXAL_API_KEY")
+        if pixal_voice_id and voice_id == pixal_voice_id and pixal_api_key:
+            cached = self._alternate_clients.get("pixal")
+            if cached is not None:
+                return cached
+            if AsyncElevenLabs is None:
+                raise TextToSpeechError(
+                    "The `elevenlabs` package is not installed. Run `pip install elevenlabs` "
+                    "to enable P.I.X.A.L. voice synthesis."
+                )
+            cached = AsyncElevenLabs(api_key=pixal_api_key)
+            self._alternate_clients["pixal"] = cached
+            return cached
+
+        # Compatibility: an explicitly supplied override without its own
+        # credential continues to use the primary client.
+        return self._client
 
     def _is_retryable(self, exc: Exception) -> bool:
         if isinstance(exc, _NETWORK_EXCEPTIONS):
@@ -106,19 +132,18 @@ class AsyncElevenLabsClient:
         return backoff + jitter
 
     async def synthesize(self, text: str, *, voice_id: Optional[str] = None) -> bytes:
-        """Synthesizes `text` to audio bytes (encoded per `output_format`,
-        MP3 by default). Raises TextToSpeechError if synthesis fails after
-        all retries — callers must catch this and fall back to text-only."""
+        """Synthesize text, selecting the credential associated with the voice."""
         if not text or not text.strip():
             raise TextToSpeechError("Cannot synthesize empty text.")
 
         target_voice = voice_id or self.voice_id
+        client = self._client_for_voice(target_voice)
         last_exc: Optional[Exception] = None
 
         for attempt in range(self.max_retries + 1):
             try:
                 start = time.monotonic()
-                audio_stream = self._client.text_to_speech.convert(
+                audio_stream = client.text_to_speech.convert(
                     voice_id=target_voice,
                     text=text,
                     model_id=self.model_id,
@@ -154,12 +179,18 @@ class AsyncElevenLabsClient:
         raise TextToSpeechError(f"ElevenLabs synthesis failed after retries: {last_exc}")
 
     async def close(self) -> None:
-        closer = getattr(self._client, "aclose", None) or getattr(self._client, "close", None)
-        if closer is None:
-            return
-        result = closer()
-        if asyncio.iscoroutine(result):
-            await result
+        clients = [self._client, *self._alternate_clients.values()]
+        seen = set()
+        for client in clients:
+            if id(client) in seen:
+                continue
+            seen.add(id(client))
+            closer = getattr(client, "aclose", None) or getattr(client, "close", None)
+            if closer is None:
+                continue
+            result = closer()
+            if asyncio.iscoroutine(result):
+                await result
 
 
 async def synthesize_with_fallback(
@@ -169,19 +200,7 @@ async def synthesize_with_fallback(
     *,
     voice_id: Optional[str] = None,
 ) -> Tuple[Optional[bytes], Optional[str]]:
-    """The single "optional post-processing step" every text response
-    passes through. Never raises: a disabled toggle, a missing/unconfigured
-    backend, or a synthesis failure all fall back to (None, None) — i.e.
-    text-only output, exactly as if voice were off.
-
-    `voice_id` is an optional per-call override of the client's own
-    default voice — this is the whole dual-voice mechanism for P.I.X.A.L.
-    (see zane/companion_bridge.py and zane/core.py): her notices reuse
-    this exact same AsyncElevenLabsClient (and its retry/backoff/auth
-    plumbing) rather than a second client instance, routed to
-    `PIXAL_VOICE_ID` instead of Zane's `ZANE_VOICE_ID` purely via this
-    parameter.
-    """
+    """Optional TTS post-processing that never breaks a conversation turn."""
     if not enabled or client is None or not text or not text.strip():
         return None, None
     try:
