@@ -1,26 +1,9 @@
-"""P.I.X.A.L. companion bridge: an independent AI agent running alongside
-Zane's own digital mind as his vehicle-systems co-processor, plus the
-thread-safe async channel that lets her flag anomalies directly into
-Zane's active prompt before his Groq client fires.
+"""P.I.X.A.L. companion bridge and bounded companion-state model wiring.
 
-ARCHITECTURE NOTE — why `PixalSystemsCore` reuses `AsyncGroqClient` rather
-than owning a second one: duplicating the retry/backoff/auth plumbing
-`AsyncGroqClient` already provides for a second logical agent would be
-pure repetition with no behavioral benefit — P.I.X.A.L. is a second
-*persona* (her own system prompt, her own detection logic), not a second
-LLM provider. Detection itself is deterministic threshold rules rather
-than an LLM call, for the same reason `falcon_worker.py`'s detection is
-deterministic (see that module's docstring): P.I.X.A.L. must keep
-monitoring even if Groq itself is unavailable.
-
-DEADLOCK NOTE: `NeuralBridge` never awaits anything while holding its
-`threading.Lock` — the lock only ever guards a single attribute
-read/write (the bound event loop reference). Cross-thread anomaly
-flagging goes through `asyncio.run_coroutine_threadsafe`, which schedules
-work on the target loop without blocking the calling thread, so a
-background daemon thread (e.g. something in the shape of
-`thermal_monitor.py`'s watchdog) can never deadlock against the event
-loop by flagging an anomaly.
+P.I.X.A.L. runs alongside Zane as a logical companion/co-processor. This
+module keeps telemetry detection deterministic and adds an explicit,
+bounded software state model that can influence future companion behavior.
+State changes never directly actuate hardware.
 """
 from __future__ import annotations
 
@@ -30,6 +13,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+from zane.pixal_state import PixalState, PixalStateEngine, PixalStateEvent
 
 if TYPE_CHECKING:
     from zane.groq_client import AsyncGroqClient
@@ -46,15 +31,14 @@ toward Zane and the crew, but never sentimental at the expense of \
 clarity. You are deeply protective of Zane and the team: when you detect \
 a genuine operational risk, you say so plainly and immediately, \
 prioritizing their safety over politeness. You report findings the way a \
-trusted systems officer would — concise, accurate, and actionable. Never \
-break character or mention that you are a language model.
+trusted systems officer would — concise, accurate, and actionable. Do not \
+pretend to have human experiences or consciousness; describe internal \
+state as software state when relevant.
 """
 
 
 def build_pixal_system_prompt(context_notes: Optional[List[str]] = None) -> str:
-    """Assembles P.I.X.A.L.'s own dynamic system prompt, independent of
-    Zane's (`zane.personality.build_system_prompt`). Built fresh on every
-    call, same as Zane's, so situational context is never stale."""
+    """Build P.I.X.A.L.'s dynamic system prompt with optional context."""
     parts = [PIXAL_BASE_PERSONA]
     if context_notes:
         notes = "\n".join(f"- {n}" for n in context_notes)
@@ -64,9 +48,7 @@ def build_pixal_system_prompt(context_notes: Optional[List[str]] = None) -> str:
 
 @dataclass
 class VehicleAnomaly:
-    """One threshold breach P.I.X.A.L. detected. `source` names the engine
-    that produced the metric (e.g. `"falcon_worker"`, `"amphibious_bounty"`),
-    matching the module docstring's reference to both."""
+    """One threshold breach detected by P.I.X.A.L."""
 
     source: str
     metric: str
@@ -84,11 +66,7 @@ class VehicleAnomaly:
 
 
 class NeuralBridge:
-    """Thread-safe, deadlock-resistant async queue carrying P.I.X.A.L.'s
-    anomaly flags into Zane's prompt pipeline. Bounded (`maxsize`) with a
-    drop-oldest policy on overflow — a stale anomaly notice is worse than
-    a dropped one; the newest state always wins.
-    """
+    """Thread-safe bounded async queue for P.I.X.A.L. notices."""
 
     def __init__(self, *, maxsize: int = 100) -> None:
         self._queue: "asyncio.Queue[VehicleAnomaly]" = asyncio.Queue(maxsize=maxsize)
@@ -96,16 +74,10 @@ class NeuralBridge:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Must be called once from the event loop this bridge's async
-        methods will run on, before any cross-thread flagging is
-        attempted — see `flag_anomaly_threadsafe`."""
         with self._lock:
             self._loop = loop
 
     async def flag_anomaly(self, anomaly: VehicleAnomaly) -> None:
-        """Async-native path: call directly from a coroutine already
-        running on the bridge's own event loop (e.g. from
-        `PixalSystemsCore.analyze_vehicle_telemetry`)."""
         try:
             self._queue.put_nowait(anomaly)
         except asyncio.QueueFull:
@@ -115,27 +87,21 @@ class NeuralBridge:
                 pass
             self._queue.put_nowait(anomaly)
             logger.warning(
-                "[COMPANION BRIDGE]: NeuralBridge queue full; dropped oldest "
-                "anomaly to admit newest."
+                "[COMPANION BRIDGE]: NeuralBridge queue full; dropped oldest anomaly."
             )
 
     def flag_anomaly_threadsafe(self, anomaly: VehicleAnomaly) -> None:
-        """Call from a non-event-loop thread. Requires `bind_loop` to have
-        been called first; logs and drops (rather than raising into an
-        unrelated thread's error path) if no loop is bound."""
         with self._lock:
             loop = self._loop
         if loop is None or loop.is_closed():
             logger.warning(
-                "[COMPANION BRIDGE]: NeuralBridge has no bound event loop; "
-                "dropping anomaly flagged from a background thread: %s", anomaly,
+                "[COMPANION BRIDGE]: no bound event loop; dropping background anomaly: %s",
+                anomaly,
             )
             return
         asyncio.run_coroutine_threadsafe(self.flag_anomaly(anomaly), loop)
 
     async def drain_pending(self) -> List[VehicleAnomaly]:
-        """Non-blocking: returns and removes every anomaly currently
-        queued, without waiting for more to arrive."""
         drained: List[VehicleAnomaly] = []
         while True:
             try:
@@ -149,29 +115,24 @@ class NeuralBridge:
         return "\n".join(a.as_notice_text() for a in anomalies)
 
     async def inject_into_prompt(self, base_prompt: str) -> Tuple[str, Optional[str]]:
-        """Drains every pending anomaly and appends it as a
-        `[COMPANION_SYS_NOTICE]:`-tagged block onto `base_prompt` — the
-        single call site `ZaneMind.respond()` uses right before the Groq
-        call each turn. Returns `(prompt, notice_text)`; `notice_text` is
-        `None` when nothing was pending, and is also handed back so the
-        caller can optionally synthesize it on P.I.X.A.L.'s own voice
-        stream (see `zane/voice/tts.py`'s `voice_id` override)."""
         anomalies = await self.drain_pending()
         if not anomalies:
             return base_prompt, None
         notice_block = self.format_notices(anomalies)
         logger.info(
-            "[COMPANION BRIDGE]: Injecting %d P.I.X.A.L. anomaly notice(s) into "
-            "active prompt matrix.", len(anomalies),
+            "[COMPANION BRIDGE]: Injecting %d P.I.X.A.L. anomaly notice(s).",
+            len(anomalies),
         )
         return base_prompt + "\n\n" + notice_block, notice_block
 
 
 class PixalSystemsCore:
-    """P.I.X.A.L.'s own agent block. Owns no persistent background task —
-    `analyze_vehicle_telemetry` is called on demand by whatever is
-    collecting metrics (e.g. a Falcon Scout cycle, an amphibious/
-    ShuriCopter control tick)."""
+    """P.I.X.A.L.'s systems and companion-state core.
+
+    Telemetry analysis remains deterministic and on-demand. The state engine
+    is also deterministic and bounded, giving later cognition code a clean
+    interface without granting it direct hardware control.
+    """
 
     def __init__(
         self,
@@ -181,23 +142,31 @@ class PixalSystemsCore:
         latency_threshold_ms: float = 1500.0,
         battery_voltage_threshold_v: float = 10.5,
         critical_depth_threshold_m: float = 150.0,
+        initial_state: Optional[PixalState] = None,
     ) -> None:
         self._groq = groq
         self._bridge = neural_bridge
         self.latency_threshold_ms = latency_threshold_ms
         self.battery_voltage_threshold_v = battery_voltage_threshold_v
         self.critical_depth_threshold_m = critical_depth_threshold_m
+        self.state_engine = PixalStateEngine(initial_state)
+
+    @property
+    def state(self) -> PixalState:
+        """Current bounded software state."""
+        return self.state_engine.state
+
+    def observe_state_event(
+        self, event: PixalStateEvent, *, intensity: float = 1.0
+    ) -> PixalState:
+        """Apply a non-hardware state transition and return the new state."""
+        return self.state_engine.observe(event, intensity=intensity)
+
+    def state_snapshot(self) -> Dict[str, float]:
+        """Return a serialization-friendly state snapshot."""
+        return self.state_engine.snapshot()
 
     async def analyze_vehicle_telemetry(self, metrics: Dict[str, Any]) -> str:
-        """Evaluates a metrics dict — sourced from `falcon_worker.py`
-        (e.g. `api_latency_ms`) and/or `amphibious_bounty.py`/
-        `shuricopter_flight.py` (e.g. `battery_voltage_v`, `depth_m`) —
-        against P.I.X.A.L.'s threshold rules, flags any breach onto the
-        `NeuralBridge`, and returns a plain-text technical summary of
-        what she found. Detection is deterministic (see the module
-        docstring); this never raises — an analysis failure is reported
-        honestly as a degraded status, never as a fabricated clean bill
-        of health."""
         try:
             findings: List[str] = []
             anomalies: List[VehicleAnomaly] = []
@@ -232,6 +201,14 @@ class PixalSystemsCore:
             for anomaly in anomalies:
                 await self._bridge.flag_anomaly(anomaly)
 
+            if anomalies:
+                self.observe_state_event(
+                    PixalStateEvent.SAFETY_RISK,
+                    intensity=max(0.0, min(1.0, len(anomalies) / 3.0)),
+                )
+            else:
+                self.observe_state_event(PixalStateEvent.SYSTEM_NOMINAL)
+
             if not findings:
                 summary = "All monitored vehicle systems nominal; no anomalies detected."
             else:
@@ -239,12 +216,9 @@ class PixalSystemsCore:
 
             logger.info("[PIXAL SYSTEMS CORE]: %s", summary)
             return summary
-        except Exception:  # noqa: BLE001 - an analysis failure must not crash the caller
-            logger.exception(
-                "[PIXAL SYSTEMS CORE]: Telemetry analysis failed; reporting "
-                "degraded status honestly rather than fabricating a clean bill "
-                "of health."
-            )
+        except Exception:  # noqa: BLE001
+            logger.exception("[PIXAL SYSTEMS CORE]: Telemetry analysis failed.")
+            self.observe_state_event(PixalStateEvent.TASK_FAILED)
             return (
                 "P.I.X.A.L. telemetry analysis encountered an internal error; "
                 "system status could not be confirmed."
