@@ -126,8 +126,10 @@ class Settings:
     analytics_seed: int = field(default_factory=lambda: _env_int("ZANE_ANALYTICS_SEED", 0))
 
     # --- Voice (ElevenLabs text-to-speech) ---
+    # Zane uses his own key. ELEVENLABS_API_KEY remains as a legacy fallback
+    # so existing deployments do not break during the migration.
     elevenlabs_api_key: Optional[str] = field(
-        default_factory=lambda: os.getenv("ELEVENLABS_API_KEY")
+        default_factory=lambda: os.getenv("ZANE_API_KEY") or os.getenv("ELEVENLABS_API_KEY")
     )
     # Never hardcode a voice ID — always sourced from the environment.
     elevenlabs_voice_id: Optional[str] = field(default_factory=lambda: os.getenv("ZANE_VOICE_ID"))
@@ -279,10 +281,9 @@ class Settings:
 
     # --- P.I.X.A.L. companion bridge (zane/companion_bridge.py) ---
     # Dual-voice routing: P.I.X.A.L.'s anomaly notices are synthesized on
-    # this voice, distinct from ZANE_VOICE_ID, via the same
-    # AsyncElevenLabsClient (see synthesize_with_fallback's `voice_id`
-    # override) rather than a second TTS client. Never hardcode this —
-    # env-only, like every other voice ID in this project.
+    # this voice with PIXAL_API_KEY, distinct from ZANE_API_KEY. The TTS
+    # client keeps the two provider clients isolated (see zane/voice/tts.py).
+    # Never hardcode this — env-only, like every other voice ID in this project.
     pixal_voice_id: Optional[str] = field(default_factory=lambda: os.getenv("PIXAL_VOICE_ID"))
     pixal_battery_voltage_threshold_v: float = field(
         default_factory=lambda: _env_float("ZANE_PIXAL_BATTERY_VOLTAGE_THRESHOLD_V", 10.5)
