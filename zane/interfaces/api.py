@@ -1,26 +1,20 @@
-"""FastAPI deployment surface for Zane's digital mind.
-
-Run with:  uvicorn zane.interfaces.api:app --host 0.0.0.0 --port 8000
-(or `python -m zane --mode api`)
-
-One `SharedBackend` (Groq client, C++ analytics engine, web search tool,
-optional ElevenLabs TTS client) is built once at startup and shared across
-every session; each `session_id` gets its own `ZaneMind` (i.e. its own
-conversation memory, humor toggle, and voice toggle) lazily on first use.
-"""
+"""FastAPI deployment surface for Zane's digital mind."""
 from __future__ import annotations
 
 import base64
 import logging
+import secrets
 import time
 from contextlib import asynccontextmanager
 from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from zane.config import settings
 from zane.core import SharedBackend, ZaneMind
+from zane.email.oauth import GmailOAuthError, GmailOAuthManager
 from zane.groq_client import GroqUnavailableError
 from zane.interfaces.base import ZaneInterface
 
@@ -57,7 +51,7 @@ class APIInterface(ZaneInterface):
     """Adapts ZaneInterface's shared command handling to a specific
     per-session ZaneMind, for use from FastAPI route handlers."""
 
-    async def start(self) -> None:  # pragma: no cover - lifecycle managed by ASGI app
+    async def start(self) -> None:
         return None
 
     async def stop(self) -> None:
@@ -75,10 +69,6 @@ class SessionManager:
             self._backend = SharedBackend.build(settings)
             self._startup_error = None
         except Exception as exc:
-            # Keep the ASGI process alive so Render's lightweight liveness
-            # probe can reach /health even when an optional backend/config
-            # dependency is temporarily unavailable. Chat remains 503 until
-            # the service is restarted with a valid backend configuration.
             self._backend = None
             self._startup_error = f"{type(exc).__name__}: {exc}"
             logger.exception("Zane backend failed during startup")
@@ -110,6 +100,7 @@ class SessionManager:
 
 
 sessions = SessionManager()
+email_oauth = GmailOAuthManager()
 
 
 @asynccontextmanager
@@ -185,6 +176,54 @@ async def command(req: CommandRequest) -> CommandResponse:
     return CommandResponse(result=reply)
 
 
+@app.get("/email/auth/start")
+async def email_auth_start() -> RedirectResponse:
+    """Start the one-time Google OAuth flow for Zane's Gmail account."""
+    state = secrets.token_urlsafe(32)
+    try:
+        authorization_url = email_oauth.authorization_url(state)
+    except Exception as exc:
+        logger.exception("Unable to start Gmail OAuth")
+        raise HTTPException(status_code=500, detail="Gmail OAuth is not configured.") from exc
+
+    response = RedirectResponse(authorization_url, status_code=302)
+    response.set_cookie(
+        "zane_gmail_oauth_state",
+        state,
+        max_age=600,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/email/auth/callback", response_class=HTMLResponse)
+async def email_auth_callback(request: Request, code: str, state: str) -> HTMLResponse:
+    """Validate OAuth state and exchange Google's authorization code."""
+    expected_state = request.cookies.get("zane_gmail_oauth_state")
+    if not expected_state or not secrets.compare_digest(expected_state, state):
+        raise HTTPException(status_code=400, detail="Invalid or expired Gmail OAuth state.")
+
+    try:
+        email_oauth.exchange_code(code, state)
+    except GmailOAuthError as exc:
+        logger.exception("Gmail OAuth callback failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    response = HTMLResponse(
+        "<!doctype html><html><head><title>Zane Gmail Authorization</title></head>"
+        "<body><h1>Gmail authorization successful</h1>"
+        "<p>Google approved Zane's Gmail send permission and issued a refresh token.</p>"
+        "<p>The refresh token is intentionally not displayed here. It must be stored "
+        "as <code>GMAIL_REFRESH_TOKEN</code> in Zane's server environment before sending email.</p>"
+        "</body></html>"
+    )
+    response.delete_cookie("zane_gmail_oauth_state")
+    logger.info("Gmail OAuth authorization completed; refresh token received.")
+    return response
+
+
 @app.delete("/session/{session_id}")
 async def end_session(session_id: str) -> Dict[str, str]:
     sessions.drop(session_id)
@@ -193,12 +232,7 @@ async def end_session(session_id: str) -> Dict[str, str]:
 
 @app.get("/health")
 async def health() -> Dict[str, str]:
-    """Render liveness probe: intentionally lightweight and always 200.
-
-    This endpoint must not depend on Groq, Turso, TTS, or other external
-    services. Render can therefore distinguish a live HTTP process from a
-    backend-readiness problem without restarting a healthy container.
-    """
+    """Render liveness probe: intentionally lightweight and always 200."""
     return {"status": "ok"}
 
 
