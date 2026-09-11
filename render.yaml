@@ -9,12 +9,15 @@ services:
     env: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    startCommand: uvicorn zane.interfaces.api:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: GROQ_API_KEY
         sync: false
-      - key: GROQ_MODEL
-        value: llama-3.3-70b-versatile
+      - key: GROQ_FAST_MODEL
+        value: openai/gpt-oss-20b
+      - key: GROQ_DEEP_MODEL
+        value: openai/gpt-oss-120b
       - key: TAVILY_API_KEY
         sync: false
       - key: SEARCH_BACKEND
