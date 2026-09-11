@@ -7,21 +7,6 @@ One `SharedBackend` (Groq client, C++ analytics engine, web search tool,
 optional ElevenLabs TTS client) is built once at startup and shared across
 every session; each `session_id` gets its own `ZaneMind` (i.e. its own
 conversation memory, humor toggle, and voice toggle) lazily on first use.
-
-Voice output design choice: when a session's voice toggle is on and
-synthesis succeeds, `POST /chat` includes the audio as a base64 string
-(`audio_base64` + `audio_format`) in the *same* JSON response as the text,
-rather than switching the endpoint's response type or exposing a separate
-streaming/binary route. One request/response pair per turn keeps the text
-and its audio atomically tied together with no risk of a client fetching
-audio for the wrong turn, and keeps a single, stable OpenAPI schema for
-`/chat` regardless of whether voice is on. The tradeoff is the ~33%
-size inflation base64 adds to the payload; for short spoken replies this
-is an acceptable cost for the simplicity. A dedicated binary
-`/chat/audio/{turn_id}` endpoint (returning `Response(media_type="audio/mpeg")`
-directly, for e.g. an HTML `<audio>` tag `src`) would be the natural next
-step if payload size or streaming playback becomes a real requirement, but
-isn't needed yet and isn't implemented here.
 """
 from __future__ import annotations
 
@@ -55,16 +40,8 @@ class ChatResponse(BaseModel):
     elapsed_ms: float
     humor_enabled: bool
     voice_enabled: bool
-    # Populated only when the session's voice toggle is on and synthesis
-    # succeeded; both are omitted/None otherwise (voice off, no TTS backend
-    # configured, or synthesis failed) — see the module docstring for why
-    # audio rides along in this same response instead of a separate route.
-    audio_base64: Optional[str] = Field(
-        None, description="Base64-encoded synthesized speech for `reply`, if voice is enabled."
-    )
-    audio_format: Optional[str] = Field(
-        None, description="ElevenLabs output_format string for audio_base64, e.g. 'mp3_44100_128'."
-    )
+    audio_base64: Optional[str] = Field(None, description="Base64-encoded synthesized speech for `reply`, if voice is enabled.")
+    audio_format: Optional[str] = Field(None, description="ElevenLabs output_format string for audio_base64, e.g. 'mp3_44100_128'.")
 
 
 class CommandRequest(BaseModel):
@@ -91,24 +68,45 @@ class SessionManager:
     def __init__(self) -> None:
         self._backend: Optional[SharedBackend] = None
         self._sessions: Dict[str, ZaneMind] = {}
+        self._startup_error: Optional[str] = None
 
     async def startup(self) -> None:
-        self._backend = SharedBackend.build(settings)
+        try:
+            self._backend = SharedBackend.build(settings)
+            self._startup_error = None
+        except Exception as exc:
+            # Keep the ASGI process alive so Render's lightweight liveness
+            # probe can reach /health even when an optional backend/config
+            # dependency is temporarily unavailable. Chat remains 503 until
+            # the service is restarted with a valid backend configuration.
+            self._backend = None
+            self._startup_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("Zane backend failed during startup")
 
     async def shutdown(self) -> None:
         if self._backend is not None:
             await self._backend.aclose()
         self._sessions.clear()
+        self._backend = None
 
     def get_or_create(self, session_id: str) -> ZaneMind:
         if self._backend is None:
-            raise RuntimeError("SessionManager used before startup().")
+            detail = self._startup_error or "Zane backend is not initialized."
+            raise RuntimeError(detail)
         if session_id not in self._sessions:
             self._sessions[session_id] = ZaneMind(shared=self._backend, session_id=session_id)
         return self._sessions[session_id]
 
     def drop(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+
+    @property
+    def ready(self) -> bool:
+        return self._backend is not None
+
+    @property
+    def startup_error(self) -> Optional[str]:
+        return self._startup_error
 
 
 sessions = SessionManager()
@@ -117,7 +115,7 @@ sessions = SessionManager()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await sessions.startup()
-    logger.info("Zane's digital mind is online (API interface).")
+    logger.info("Zane's digital mind API process is online (backend_ready=%s).", sessions.ready)
     yield
     await sessions.shutdown()
     logger.info("Zane's digital mind has powered down (API interface).")
@@ -133,10 +131,6 @@ app = FastAPI(
 
 @app.middleware("http")
 async def record_request_latency(request: Request, call_next):
-    """Feeds Falcon Scout's `LatencyRecorder` (see zane/falcon_worker.py)
-    real per-request timings; a no-op if the backend hasn't finished
-    starting up yet or Falcon Scout is disabled (recorder always exists,
-    just goes unread in that case)."""
     start = time.monotonic()
     response = await call_next(request)
     elapsed_ms = (time.monotonic() - start) * 1000
@@ -152,7 +146,10 @@ async def record_request_latency(request: Request, call_next):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
-    mind = sessions.get_or_create(req.session_id)
+    try:
+        mind = sessions.get_or_create(req.session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=f"Zane backend is not ready: {exc}")
     try:
         result = await mind.respond(
             req.message,
@@ -177,7 +174,10 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
 @app.post("/command", response_model=CommandResponse)
 async def command(req: CommandRequest) -> CommandResponse:
-    mind = sessions.get_or_create(req.session_id)
+    try:
+        mind = sessions.get_or_create(req.session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=f"Zane backend is not ready: {exc}")
     interface = APIInterface(mind)
     reply = await interface.handle_command(req.command)
     if reply is None:
@@ -193,4 +193,25 @@ async def end_session(session_id: str) -> Dict[str, str]:
 
 @app.get("/health")
 async def health() -> Dict[str, str]:
+    """Render liveness probe: intentionally lightweight and always 200.
+
+    This endpoint must not depend on Groq, Turso, TTS, or other external
+    services. Render can therefore distinguish a live HTTP process from a
+    backend-readiness problem without restarting a healthy container.
+    """
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready() -> Dict[str, object]:
+    """Readiness/diagnostic endpoint for humans and deployment checks."""
+    if not sessions.ready:
+        return {
+            "status": "not_ready",
+            "backend": "unavailable",
+            "detail": sessions.startup_error or "backend not initialized",
+        }
+    return {
+        "status": "ready",
+        "backend": "ok",
+    }
