@@ -20,6 +20,11 @@ tavily-python>=0.5.0  # optional: used automatically if TAVILY_API_KEY is set
 elevenlabs>=1.9.0
 httpx>=0.27.0
 
+# Gmail API (OAuth 2.0 outbound email)
+google-api-python-client>=2.0.0
+google-auth>=2.0.0
+google-auth-oauthlib>=1.0.0
+
 # Ice Protocol thermal governor, optional and disabled by default
 # (ZANE_ICE_PROTOCOL_ENABLED): psutil has no real sensor access in most
 # container/cloud deployments anyway — see zane/thermal_monitor.py.
