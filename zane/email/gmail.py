@@ -1,17 +1,18 @@
 """Minimal Gmail API client for Zane's outbound email tool.
 
-OAuth credentials are loaded only from environment variables. No Gmail
-password is used, and this module requests only the gmail.send scope.
+OAuth credentials are loaded from private environment variables plus the
+secure token store. No Gmail password is used, and this module requests only
+the gmail.send scope.
 """
 from __future__ import annotations
 
 import base64
-import json
 import os
 from email.message import EmailMessage
 from typing import Any
 
 from .models import EmailDraft, EmailSendResult
+from .token_store import GmailTokenStore
 
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 
@@ -23,8 +24,9 @@ class GmailConfigurationError(RuntimeError):
 class GmailEmailClient:
     """Send email through Gmail using a server-side OAuth refresh token."""
 
-    def __init__(self, service: Any | None = None) -> None:
+    def __init__(self, service: Any | None = None, token_store: GmailTokenStore | None = None) -> None:
         self._service = service
+        self._token_store = token_store or GmailTokenStore()
 
     def _build_service(self) -> Any:
         if self._service is not None:
@@ -32,12 +34,12 @@ class GmailEmailClient:
 
         client_id = os.getenv("GOOGLE_CLIENT_ID")
         client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-        refresh_token = os.getenv("GMAIL_REFRESH_TOKEN")
+        refresh_token = os.getenv("GMAIL_REFRESH_TOKEN") or self._token_store.load()
 
         if not client_id or not client_secret or not refresh_token:
             raise GmailConfigurationError(
                 "Gmail OAuth requires GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, "
-                "and GMAIL_REFRESH_TOKEN."
+                "and a stored GMAIL_REFRESH_TOKEN."
             )
 
         try:
