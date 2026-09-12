@@ -200,13 +200,13 @@ async def email_auth_start() -> RedirectResponse:
 
 @app.get("/email/auth/callback", response_class=HTMLResponse)
 async def email_auth_callback(request: Request, code: str, state: str) -> HTMLResponse:
-    """Validate OAuth state and exchange Google's authorization code."""
+    """Validate OAuth state, exchange Google's code, and store the refresh token."""
     expected_state = request.cookies.get("zane_gmail_oauth_state")
     if not expected_state or not secrets.compare_digest(expected_state, state):
         raise HTTPException(status_code=400, detail="Invalid or expired Gmail OAuth state.")
 
     try:
-        email_oauth.exchange_code(code, state)
+        email_oauth.exchange_and_store(code, state)
     except GmailOAuthError as exc:
         logger.exception("Gmail OAuth callback failed")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -214,13 +214,12 @@ async def email_auth_callback(request: Request, code: str, state: str) -> HTMLRe
     response = HTMLResponse(
         "<!doctype html><html><head><title>Zane Gmail Authorization</title></head>"
         "<body><h1>Gmail authorization successful</h1>"
-        "<p>Google approved Zane's Gmail send permission and issued a refresh token.</p>"
-        "<p>The refresh token is intentionally not displayed here. It must be stored "
-        "as <code>GMAIL_REFRESH_TOKEN</code> in Zane's server environment before sending email.</p>"
+        "<p>Google approved Zane's Gmail send permission and the refresh token was stored securely.</p>"
+        "<p>The credential is not displayed in this page or written to application logs.</p>"
         "</body></html>"
     )
     response.delete_cookie("zane_gmail_oauth_state")
-    logger.info("Gmail OAuth authorization completed; refresh token received.")
+    logger.info("Gmail OAuth authorization completed; refresh token stored securely.")
     return response
 
 
