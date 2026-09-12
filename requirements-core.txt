@@ -2,7 +2,7 @@
 # stack (see requirements-memory.txt) — kept separate because
 # sentence-transformers pulls in torch, which is by far the heaviest and
 # slowest part of the build. Without it, PersistentMemory degrades
-gracefully: durable SQLite history and the rolling in-context window
+# gracefully: durable SQLite history and the rolling in-context window
 # still work fully, only semantic retrieval/embedding are skipped (see
 # zane/memory/embeddings.py, zane/memory/vector_index.py).
 
