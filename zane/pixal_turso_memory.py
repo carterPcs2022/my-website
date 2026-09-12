@@ -4,6 +4,10 @@ The in-process :class:`PixalMemoryStore` remains the public behavior model;
 this adapter persists the same bounded entries in P.I.X.A.L.'s own Turso
 database so Render restarts and redeploys do not erase companion memory.
 
+Turso is accessed through its HTTPS v2/pipeline API rather than
+``libsql_client``'s WebSocket/Hrana transport. This keeps the deployment
+simple and avoids WebSocket handshake failures on Render.
+
 Environment variables:
     PIXAL_TDB_URL: P.I.X.A.L.'s Turso/libSQL database URL.
     PIXAL_TAT: P.I.X.A.L.'s Turso auth token.
@@ -15,8 +19,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import asdict
-from typing import Any, Iterable, List, Optional
+from types import SimpleNamespace
+from typing import Any, Iterable, List
+
+import httpx
 
 from zane.pixal_memory import PixalMemoryEntry, PixalMemoryStore
 
@@ -34,9 +42,69 @@ CREATE TABLE IF NOT EXISTS pixal_memories (
 )
 """
 
+_TIMEOUT_SECONDS = 3.0
+
 
 class PixalTursoConfigurationError(RuntimeError):
     """Raised when P.I.X.A.L.'s Turso configuration is incomplete."""
+
+
+class _HttpTursoClient:
+    """Tiny synchronous Turso v2/pipeline client.
+
+    It intentionally exposes an ``execute()`` method with a ``rows`` result
+    so the memory store remains easy to test with a fake client.
+    """
+
+    def __init__(self, url: str, token: str) -> None:
+        self._url = url.replace("libsql://", "https://", 1).rstrip("/") + "/v2/pipeline"
+        self._token = token
+        self._client = httpx.Client(timeout=_TIMEOUT_SECONDS)
+
+    @staticmethod
+    def _arg(value: Any) -> dict[str, Any]:
+        if value is None:
+            return {"type": "null"}
+        if isinstance(value, bool):
+            return {"type": "integer", "value": str(int(value))}
+        if isinstance(value, int):
+            return {"type": "integer", "value": str(value)}
+        if isinstance(value, float):
+            return {"type": "float", "value": value}
+        return {"type": "text", "value": str(value)}
+
+    def execute(self, sql: str, args: Iterable[Any] = ()) -> Any:
+        payload = {
+            "requests": [
+                {
+                    "type": "execute",
+                    "stmt": {
+                        "sql": sql,
+                        "args": [self._arg(value) for value in args],
+                    },
+                },
+                {"type": "close"},
+            ]
+        }
+        response = self._client.post(
+            self._url,
+            json=payload,
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        response.raise_for_status()
+        body = response.json()
+        first = body["results"][0]
+        if first.get("type") != "ok":
+            raise RuntimeError(f"Turso pipeline error: {first}")
+
+        result = first["response"]["result"]
+        rows = []
+        for row in result.get("rows", []):
+            rows.append([cell.get("value") if isinstance(cell, dict) else cell for cell in row])
+        return SimpleNamespace(rows=rows)
+
+    def close(self) -> None:
+        self._client.close()
 
 
 class TursoPixalMemoryStore(PixalMemoryStore):
@@ -67,13 +135,7 @@ class TursoPixalMemoryStore(PixalMemoryStore):
             raise PixalTursoConfigurationError(
                 "P.I.X.A.L. Turso requires PIXAL_TDB_URL and PIXAL_TAT."
             )
-        try:
-            from libsql_client import create_client_sync
-        except ImportError as exc:  # pragma: no cover - deployment dependency
-            raise PixalTursoConfigurationError(
-                "P.I.X.A.L. Turso persistence requires the libsql-client package."
-            ) from exc
-        return create_client_sync(url, auth_token=token)
+        return _HttpTursoClient(url, token)
 
     def _ensure_schema(self) -> None:
         self._client.execute(_TABLE_SQL)
@@ -142,12 +204,8 @@ class TursoPixalMemoryStore(PixalMemoryStore):
         importance: float = 0.5,
         tags: Iterable[str] = (),
     ) -> PixalMemoryEntry:
-        entry = super().remember(
-            content, role=role, importance=importance, tags=tags
-        )
+        entry = super().remember(content, role=role, importance=importance, tags=tags)
         self._persist(entry)
-        # The base class may have evicted an entry before we persisted the new
-        # one; remove any rows that are no longer represented in memory.
         current_ids = {item.memory_id for item in self._entries}
         result = self._client.execute("SELECT memory_id FROM pixal_memories")
         for row in result.rows:
@@ -173,8 +231,6 @@ class TursoPixalMemoryStore(PixalMemoryStore):
 
     def ping(self) -> float:
         """Return a real Turso round-trip latency measurement in milliseconds."""
-        import time
-
         start = time.monotonic()
         self._client.execute("SELECT 1")
         return (time.monotonic() - start) * 1000
