@@ -12,11 +12,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
+from zane.cognitive_loop import CognitiveCompanionLoop, CognitiveContext
 from zane.config import settings
 from zane.core import SharedBackend, ZaneMind
 from zane.email.oauth import GmailOAuthError, GmailOAuthManager
 from zane.groq_client import GroqUnavailableError
 from zane.interfaces.base import ZaneInterface
+from zane.pixal_protocol import PixalMessageBus
+from zane.shared_heart import SharedHeart
 
 logger = logging.getLogger("zane.interfaces.api")
 
@@ -63,13 +66,26 @@ class SessionManager:
         self._backend: Optional[SharedBackend] = None
         self._sessions: Dict[str, ZaneMind] = {}
         self._startup_error: Optional[str] = None
+        self._companion_loop: Optional[CognitiveCompanionLoop] = None
 
     async def startup(self) -> None:
         try:
             self._backend = SharedBackend.build(settings)
+            self._companion_loop = CognitiveCompanionLoop(
+                pixal_state_engine=self._backend.pixal.state_engine,
+                shared_heart=SharedHeart(),
+                message_bus=PixalMessageBus(),
+            )
             self._startup_error = None
+            logger.info(
+                "P.I.X.A.L. cognitive companion online "
+                "(state=%s, shared_heart=%s).",
+                self._backend.pixal.state_snapshot(),
+                self._companion_loop.shared_heart.snapshot(),
+            )
         except Exception as exc:
             self._backend = None
+            self._companion_loop = None
             self._startup_error = f"{type(exc).__name__}: {exc}"
             logger.exception("Zane backend failed during startup")
 
@@ -77,6 +93,7 @@ class SessionManager:
         if self._backend is not None:
             await self._backend.aclose()
         self._sessions.clear()
+        self._companion_loop = None
         self._backend = None
 
     def get_or_create(self, session_id: str) -> ZaneMind:
@@ -87,12 +104,42 @@ class SessionManager:
             self._sessions[session_id] = ZaneMind(shared=self._backend, session_id=session_id)
         return self._sessions[session_id]
 
+    def run_companion_cycle(self, message: str) -> Optional[str]:
+        """Run P.I.X.A.L.'s deterministic preflight before Zane reasons.
+
+        The companion loop is coordination-only: it never executes hardware.
+        Its recommendation is returned as context for Zane's main reasoning
+        path, while the shared state, message bus, and Shared Heart persist
+        for the lifetime of the API process.
+        """
+        if self._companion_loop is None or self._backend is None:
+            return None
+
+        result = self._companion_loop.run(
+            CognitiveContext(
+                input_text=message,
+                proposed_action=message,
+            )
+        )
+        logger.info(
+            "P.I.X.A.L. companion cycle complete "
+            "(safety=%s, priority=%s, heart_version=%s).",
+            result.safety.allowed,
+            result.safety.priority.value,
+            result.shared_context_version,
+        )
+        return result.recommendation
+
     def drop(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
 
     @property
     def ready(self) -> bool:
         return self._backend is not None
+
+    @property
+    def companion_ready(self) -> bool:
+        return self._companion_loop is not None
 
     @property
     def startup_error(self) -> Optional[str]:
@@ -106,7 +153,12 @@ email_oauth = GmailOAuthManager()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await sessions.startup()
-    logger.info("Zane's digital mind API process is online (backend_ready=%s).", sessions.ready)
+    logger.info(
+        "Zane's digital mind API process is online "
+        "(backend_ready=%s, pixal_ready=%s).",
+        sessions.ready,
+        sessions.companion_ready,
+    )
     yield
     await sessions.shutdown()
     logger.info("Zane's digital mind has powered down (API interface).")
@@ -141,11 +193,25 @@ async def chat(req: ChatRequest) -> ChatResponse:
         mind = sessions.get_or_create(req.session_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=f"Zane backend is not ready: {exc}")
+
+    companion_recommendation = sessions.run_companion_cycle(req.message)
+    mission_context = req.mission_context
+    if companion_recommendation:
+        companion_context = (
+            "P.I.X.A.L. companion preflight for this turn:\n"
+            f"{companion_recommendation}"
+        )
+        mission_context = (
+            f"{mission_context}\n\n{companion_context}"
+            if mission_context
+            else companion_context
+        )
+
     try:
         result = await mind.respond(
             req.message,
             addressed_by=req.display_name,
-            mission_context=req.mission_context,
+            mission_context=mission_context,
         )
     except GroqUnavailableError as exc:
         raise HTTPException(status_code=503, detail=f"Zane's cognitive backend is unavailable: {exc}")
@@ -253,4 +319,5 @@ async def ready() -> Dict[str, object]:
     return {
         "status": "ready",
         "backend": "ok",
+        "pixal": "ok" if sessions.companion_ready else "unavailable",
     }
