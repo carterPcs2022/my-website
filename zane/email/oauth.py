@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 from .gmail import GMAIL_SEND_SCOPE, GmailConfigurationError
+from .token_store import GmailTokenStore
 
 
 class GmailOAuthError(RuntimeError):
@@ -13,6 +14,9 @@ class GmailOAuthError(RuntimeError):
 
 class GmailOAuthManager:
     """Build Google's server-side OAuth flow for Zane's Gmail account."""
+
+    def __init__(self, token_store: GmailTokenStore | None = None) -> None:
+        self.token_store = token_store or GmailTokenStore()
 
     def _config(self) -> dict[str, Any]:
         client_id = os.getenv("GOOGLE_CLIENT_ID")
@@ -72,3 +76,11 @@ class GmailOAuthManager:
                 "Google did not return a refresh token. Re-authorize with consent."
             )
         return refresh_token
+
+    def exchange_and_store(self, code: str, state: str) -> None:
+        """Exchange the authorization code and persist only the refresh token."""
+        refresh_token = self.exchange_code(code, state)
+        try:
+            self.token_store.save(refresh_token)
+        except Exception as exc:
+            raise GmailOAuthError("Gmail authorization succeeded, but token storage failed.") from exc
