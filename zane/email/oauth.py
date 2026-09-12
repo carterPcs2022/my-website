@@ -4,7 +4,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .gmail import GMAIL_SEND_SCOPE, GmailConfigurationError
+from .errors import GmailConfigurationError
+from .gmail import GMAIL_SEND_SCOPE
 from .token_store import GmailTokenStore
 
 
