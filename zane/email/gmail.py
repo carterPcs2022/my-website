@@ -11,14 +11,11 @@ import os
 from email.message import EmailMessage
 from typing import Any
 
+from .errors import GmailConfigurationError
 from .models import EmailDraft, EmailSendResult
 from .token_store import GmailTokenStore
 
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
-
-
-class GmailConfigurationError(RuntimeError):
-    """Raised when Gmail OAuth configuration is incomplete."""
 
 
 class GmailEmailClient:
