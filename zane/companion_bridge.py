@@ -15,9 +15,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from zane.pixal_state import PixalState, PixalStateEngine, PixalStateEvent
+from zane.pixal_turso_memory import build_pixal_memory_store
 
 if TYPE_CHECKING:
     from zane.groq_client import AsyncGroqClient
+    from zane.pixal_memory import PixalMemoryStore
 
 logger = logging.getLogger("zane.companion_bridge")
 
@@ -127,11 +129,12 @@ class NeuralBridge:
 
 
 class PixalSystemsCore:
-    """P.I.X.A.L.'s systems and companion-state core.
+    """P.I.X.A.L.'s systems, companion-state, and durable-memory core.
 
     Telemetry analysis remains deterministic and on-demand. The state engine
-    is also deterministic and bounded, giving later cognition code a clean
-    interface without granting it direct hardware control.
+    is deterministic and bounded, while companion memory persists important
+    operational events in P.I.X.A.L.'s dedicated Turso database when the
+    PIXAL_TDB_URL and PIXAL_TAT environment variables are configured.
     """
 
     def __init__(
@@ -143,6 +146,7 @@ class PixalSystemsCore:
         battery_voltage_threshold_v: float = 10.5,
         critical_depth_threshold_m: float = 150.0,
         initial_state: Optional[PixalState] = None,
+        memory_store: Optional["PixalMemoryStore"] = None,
     ) -> None:
         self._groq = groq
         self._bridge = neural_bridge
@@ -150,6 +154,7 @@ class PixalSystemsCore:
         self.battery_voltage_threshold_v = battery_voltage_threshold_v
         self.critical_depth_threshold_m = critical_depth_threshold_m
         self.state_engine = PixalStateEngine(initial_state)
+        self.memory = memory_store or build_pixal_memory_store()
 
     @property
     def state(self) -> PixalState:
@@ -165,6 +170,20 @@ class PixalSystemsCore:
     def state_snapshot(self) -> Dict[str, float]:
         """Return a serialization-friendly state snapshot."""
         return self.state_engine.snapshot()
+
+    def remember(self, content: str, *, importance: float = 0.5, tags: Tuple[str, ...] = ()) -> str:
+        """Persist a bounded companion memory and return its stable id."""
+        entry = self.memory.remember(
+            content,
+            role="pixal",
+            importance=importance,
+            tags=tags,
+        )
+        return entry.memory_id
+
+    def recall(self, query: str, *, limit: int = 5) -> List[str]:
+        """Recall relevant P.I.X.A.L. memories without exposing storage details."""
+        return [entry.content for entry in self.memory.relevant(query, limit=limit)]
 
     async def analyze_vehicle_telemetry(self, metrics: Dict[str, Any]) -> str:
         try:
@@ -200,6 +219,11 @@ class PixalSystemsCore:
 
             for anomaly in anomalies:
                 await self._bridge.flag_anomaly(anomaly)
+                self.remember(
+                    anomaly.as_notice_text(),
+                    importance=0.9 if anomaly.severity == "CRITICAL" else 0.7,
+                    tags=("telemetry", anomaly.severity.lower(), anomaly.metric),
+                )
 
             if anomalies:
                 self.observe_state_event(
