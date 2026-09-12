@@ -235,6 +235,12 @@ async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.head("/health")
+async def health_head() -> None:
+    """UptimeRobot-compatible HEAD probe for the lightweight health endpoint."""
+    return None
+
+
 @app.get("/ready")
 async def ready() -> Dict[str, object]:
     """Readiness/diagnostic endpoint for humans and deployment checks."""
