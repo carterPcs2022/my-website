@@ -18,6 +18,7 @@ from zane.core import SharedBackend, ZaneMind
 from zane.email.oauth import GmailOAuthError, GmailOAuthManager
 from zane.groq_client import GroqUnavailableError
 from zane.interfaces.base import ZaneInterface
+from zane.interfaces.web import WEB_APP_HTML
 from zane.pixal_protocol import PixalMessageBus
 from zane.shared_heart import SharedHeart
 
@@ -185,6 +186,12 @@ async def record_request_latency(request: Request, call_next):
             latency_ms=elapsed_ms,
         )
     return response
+
+
+@app.get("/", response_class=HTMLResponse)
+async def web_console() -> HTMLResponse:
+    """Serve the built-in Zane/P.I.X.A.L. browser console."""
+    return HTMLResponse(WEB_APP_HTML)
 
 
 @app.post("/chat", response_model=ChatResponse)
