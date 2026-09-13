@@ -33,6 +33,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    pixal_reply: Optional[str] = Field(None, description="P.I.X.A.L.'s companion recommendation for this turn.")
     tool_calls_made: list[str]
     elapsed_ms: float
     humor_enabled: bool
@@ -108,9 +109,8 @@ class SessionManager:
         """Run P.I.X.A.L.'s deterministic preflight before Zane reasons.
 
         The companion loop is coordination-only: it never executes hardware.
-        Its recommendation is returned as context for Zane's main reasoning
-        path, while the shared state, message bus, and Shared Heart persist
-        for the lifetime of the API process.
+        Its recommendation is returned both to Zane as context and to the
+        API caller as P.I.X.A.L.'s own companion message.
         """
         if self._companion_loop is None or self._backend is None:
             return None
@@ -220,6 +220,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     return ChatResponse(
         reply=result.text,
+        pixal_reply=companion_recommendation,
         tool_calls_made=result.tool_calls_made,
         elapsed_ms=result.elapsed_ms,
         humor_enabled=mind.humor.enabled,
