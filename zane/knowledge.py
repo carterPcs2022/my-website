@@ -1,0 +1,54 @@
+"""Offline-first knowledge vault for Zane.
+
+The vault is independent from any LLM provider. A future local vector index
+or SQLite-backed store can replace the simple retrieval implementation without
+changing Zane's identity layer.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict
+from pathlib import Path
+import json
+import re
+
+
+@dataclass(frozen=True)
+class KnowledgeItem:
+    title: str
+    content: str
+    category: str = "general"
+    source: str = "local"
+
+
+class KnowledgeVault:
+    def __init__(self, root: str | Path = "knowledge") -> None:
+        self.root = Path(root)
+        self.items: list[KnowledgeItem] = []
+
+    def add(self, item: KnowledgeItem) -> None:
+        self.items.append(item)
+
+    def load_json(self, path: str | Path) -> int:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        records = data.get("items", data) if isinstance(data, dict) else data
+        added = 0
+        for record in records:
+            self.add(KnowledgeItem(**record))
+            added += 1
+        return added
+
+    def search(self, query: str, limit: int = 5) -> list[KnowledgeItem]:
+        terms = set(re.findall(r"[a-z0-9]+", query.lower()))
+        if not terms:
+            return []
+        scored: list[tuple[int, KnowledgeItem]] = []
+        for item in self.items:
+            haystack = f"{item.title} {item.content} {item.category}".lower()
+            score = sum(term in haystack for term in terms)
+            if score:
+                scored.append((score, item))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [item for _, item in scored[: max(0, int(limit))]]
+
+    def snapshot(self) -> list[dict]:
+        return [asdict(item) for item in self.items]
