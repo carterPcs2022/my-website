@@ -1,9 +1,7 @@
-# Full local-dev install: everything Zane can use, plus test tooling.
-# For a leaner production build (e.g. a resource-constrained Render build),
-# see requirements-core.txt / requirements-memory.txt and Dockerfile.
+# Render/runtime install: keep the production image lean.
+# Optional local semantic-memory dependencies live in requirements-memory.txt.
 -r requirements-core.txt
--r requirements-memory.txt
 
-# Tests
+# Tests are harmless for local development; Render does not run them at startup.
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
