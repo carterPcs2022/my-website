@@ -2,22 +2,10 @@
 searched alongside Zane's organic chat memory, without the two ever
 mixing.
 
-Namespace isolation here is physical, not just logical: `user_memory`
-(the existing per-session `PersistentMemory`, unchanged) and `ninjago_lore`
-are backed by two entirely separate `FaissVectorIndex` instances bound to
-two different files. Lore vectors are never added to the chat-memory
-index, and chat-memory vectors are never added to the lore index — so
-"[ARCHIVAL_LORE_DATABASE]" hits can never be confused with, or crowd out,
-"[HISTORICAL_CONTEXT]" hits, or vice versa.
-
-`KnowledgeManager` is a conceptual singleton, not a language-level one:
-there's exactly one instance per process because `SharedBackend.build()`
-constructs it exactly once and every session shares it (the same pattern
-already used for `AnalyticsEngine`, `EmbeddingBackend`, etc.) — not a
-`__new__`-override/module-global singleton, which would fight this
-codebase's dependency-injection-based testing conventions (every existing
-test constructs fresh instances against fakes; a hard singleton would
-make that impossible).
+`KnowledgeManager` also exposes the provider-independent `ZaneReasoning`
+facade. This gives the actual ZaneMind request path a deterministic local
+reasoning/knowledge fallback even when the archival FAISS index has not
+been compiled yet.
 """
 from __future__ import annotations
 
@@ -28,6 +16,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+from zane.knowledge import KnowledgeVault
+from zane.reasoning import ZaneReasoning
 from zane.memory.embeddings import EmbeddingBackend, EmbeddingError
 from zane.memory.vector_index import FaissVectorIndex, VectorIndexError
 
@@ -40,9 +30,11 @@ logger = logging.getLogger("zane.knowledge_manager")
 
 DEFAULT_LORE_INDEX_PATH = "data/ninjago_lore.index"
 DEFAULT_LORE_METADATA_PATH = "data/ninjago_lore.json"
+DEFAULT_RAW_LORE_PATH = "data/raw_lore.txt"
 
 LORE_TAG = "[ARCHIVAL_LORE_DATABASE]"
 HISTORY_TAG = "[HISTORICAL_CONTEXT]"
+REASONING_TAG = "[OFFLINE_REASONING_CONTEXT]"
 
 
 @dataclass
@@ -66,6 +58,19 @@ class KnowledgeManager:
         self.lore_metadata_path = lore_metadata_path
         self._lore_vector_index = FaissVectorIndex(lore_index_path)
         self._lore_chunks: Dict[int, LoreChunk] = self._load_lore_metadata()
+
+        # Provider-independent reasoning boundary. It is intentionally
+        # separate from the FAISS namespace so it can still operate when
+        # the archival index has not been compiled on a fresh deployment.
+        self.offline_vault = KnowledgeVault()
+        raw_lore = Path(DEFAULT_RAW_LORE_PATH)
+        if raw_lore.exists():
+            try:
+                loaded = self.offline_vault.load_text(raw_lore)
+                logger.info("Loaded %d raw-lore items into offline reasoning vault.", loaded)
+            except OSError as exc:
+                logger.warning("Failed to load raw lore for offline reasoning: %s", exc)
+        self.reasoning = ZaneReasoning(self.offline_vault)
 
     def _load_lore_metadata(self) -> Dict[int, LoreChunk]:
         path = Path(self.lore_metadata_path)
@@ -120,16 +125,20 @@ class KnowledgeManager:
         user_memory: Optional["PersistentMemory"] = None,
         top_k: int = 3,
     ) -> List[str]:
-        """Embeds `query_text` exactly once, then searches both namespaces
-        concurrently with that same vector, returning a single unified
-        list of tagged hits (`[ARCHIVAL_LORE_DATABASE]` / `[HISTORICAL_CONTEXT]`)
-        — a drop-in replacement for `PersistentMemory.retrieve_relevant`
-        wherever a caller wants both sources, e.g. as
-        `PersonaContext.relevant_memories`. Degrades to `[]` (never
-        raises) on embedding failure, matching the rest of this
-        codebase's RAG error handling."""
+        """Search archival lore + history and inject the repaired offline
+        reasoning context into the same list consumed by ZaneMind.respond().
+
+        Embedding failure still degrades to an empty RAG result, while the
+        provider-independent reasoning layer is deliberately independent of
+        embeddings and can continue to supply local context.
+        """
         if not query_text or not query_text.strip():
             return []
+
+        reasoning_result = self.reasoning.answer(query_text, allow_cloud=False)
+        reasoning_hits: List[str] = []
+        if reasoning_result.knowledge_used:
+            reasoning_hits.append(f"{REASONING_TAG} {reasoning_result.text}")
 
         try:
             query_vector = await asyncio.to_thread(self.embeddings.embed, query_text)
@@ -137,13 +146,13 @@ class KnowledgeManager:
             logger.warning(
                 "Knowledge query embedding failed; skipping lore/history lookups this turn: %s", exc
             )
-            return []
+            return reasoning_hits
 
         lore_hits, history_hits = await asyncio.gather(
             self._query_lore_tagged(query_vector, top_k),
             self._query_history_tagged(user_memory, query_text, query_vector, top_k),
         )
-        return lore_hits + history_hits
+        return reasoning_hits + lore_hits + history_hits
 
     @property
     def lore_chunk_count(self) -> int:
@@ -220,7 +229,7 @@ def compile_lore_database(
 
     metadata: Dict[str, dict] = {}
     for i, chunk_text in enumerate(chunks):
-        chunk_id = i + 1  # deterministic, stable ids across rebuilds of the same source
+        chunk_id = i + 1
         vector = embeddings.embed(chunk_text)
         vector_index.add(chunk_id, vector)
         record = LoreChunk(id=chunk_id, text=chunk_text, source=str(source_path), chunk_index=i)
