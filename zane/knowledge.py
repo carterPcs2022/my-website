@@ -37,6 +37,31 @@ class KnowledgeVault:
             added += 1
         return added
 
+    def load_text(self, path: str | Path, category: str = "lore") -> int:
+        """Load a plain-text knowledge source as paragraph-sized items.
+
+        This keeps the offline reasoning layer useful when a deployment has
+        raw lore/spec text but has not yet built the FAISS archival index.
+        """
+        source = Path(path)
+        text = source.read_text(encoding="utf-8")
+        added = 0
+        for index, paragraph in enumerate(
+            (part.strip() for part in text.split("\n\n")), start=1
+        ):
+            if not paragraph:
+                continue
+            self.add(
+                KnowledgeItem(
+                    title=f"{category.title()} {index}",
+                    content=paragraph,
+                    category=category,
+                    source=str(source),
+                )
+            )
+            added += 1
+        return added
+
     def search(self, query: str, limit: int = 5) -> list[KnowledgeItem]:
         terms = set(re.findall(r"[a-z0-9]+", str(query).lower()))
         if not terms:
